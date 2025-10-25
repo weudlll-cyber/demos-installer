@@ -77,7 +77,7 @@ check_demos_node       # Health check with options
 
 - To check node health:
   ```bash
-  /root/check_demo_snode --health --logs=100
+  /root/check_demos_node --health --logs=100
   ```
 
 - Node source: github.com/kynesyslabs/node
