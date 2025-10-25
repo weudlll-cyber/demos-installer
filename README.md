@@ -86,9 +86,13 @@ check_demos_node       # Health check with options
 
 🩺 Health Check Usage
 
+Show systemd status: 
+```/root/check_demos_node --status```
 
-```/root/check_demos_node --status```         # Show systemd status
-```/root/check_demos_node --logs=100```       # Tail last 100 lines of journal
+Tail last 100 lines of journal:
+```/root/check_demos_node --logs=100```
+
+
 ```/root/check_demos_node --health```         # Check service + PID + optional HTTP endpoint
 ```/root/check_demos_node --autorestart```    # Restart node if unhealthy
 ```/root/check_demos_node --restart```        # Force restart
