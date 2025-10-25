@@ -68,7 +68,7 @@ check_demos_node       # Health check with options
 - To restart and monitor logs:
   ```bash
   /root/restart_demos_node
-```
+  ```
 
 - To back up your keys:
   ```bash
