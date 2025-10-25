@@ -5,8 +5,9 @@ IFS=$'\n\t'
 # ============================================================
 # Demos Node installer - complete single-file script
 # - idempotent markers for each step
-# - reboot-aware: schedules one reboot and resumes
-# - apt-lock tolerant: retries and stops apt timers
+# - one-time reboot with visible 15s delay
+# - dpkg/apt recovery before any apt work
+# - apt-lock tolerant: stops apt timers and retries
 # - installs Docker, Bun, unzip, curl
 # - clones node repo, installs deps (bun/npm)
 # - creates run-wrapper and systemd unit
@@ -29,7 +30,6 @@ LOCKFILE="$MARKER_DIR/installer.lock"
 BUN_PROFILE="/etc/profile.d/bun.sh"
 GLOBAL_BIN="/usr/local/bin"
 
-# Ensure marker dir exists
 mkdir -p "$TMP_DIR"
 chmod 700 "$MARKER_DIR" "$TMP_DIR" 2>/dev/null || true
 
@@ -44,6 +44,78 @@ marker_exists(){ [ -f "$MARKER_DIR/$1" ]; }
 # Prevent parallel runs
 exec 200>"$LOCKFILE"
 flock -n 200 || { red_echo "❌ Another installer run is active. Exiting."; exit 1; }
+
+# -------------------------
+# dpkg/apt recovery (idempotent)
+# -------------------------
+A_RETRY_MAX=6
+A_RETRY_WAIT=5
+
+repair_dpkg_and_apt() {
+  # stop automatic apt timers that can interfere
+  sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true
+
+  # wait a short while for any active apt/dpkg to finish
+  for i in $(seq 1 $A_RETRY_MAX); do
+    if pgrep -x dpkg >/dev/null || pgrep -x apt >/dev/null || pgrep -x apt-get >/dev/null; then
+      echo "Waiting for dpkg/apt to finish (attempt $i/$A_RETRY_MAX)..."
+      sleep "$A_RETRY_WAIT"
+    else
+      break
+    fi
+  done
+
+  # forcibly terminate stale apt/dpkg processes only if still present after waiting
+  if pgrep -x dpkg >/dev/null || pgrep -x apt >/dev/null || pgrep -x apt-get >/dev/null; then
+    echo "Stale dpkg/apt processes detected; killing them"
+    sudo pkill -9 dpkg || true
+    sudo pkill -9 apt || true
+    sudo pkill -9 apt-get || true
+    sleep 1
+  fi
+
+  # remove lock files only when no dpkg/apt processes running
+  if ! pgrep -x dpkg >/dev/null && ! pgrep -x apt >/dev/null && ! pgrep -x apt-get >/dev/null; then
+    sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock || true
+  fi
+
+  # run dpkg repair and dependency fix with retries
+  local n=0
+  until sudo dpkg --configure -a >/dev/null 2>&1 && sudo apt-get install -f -y >/dev/null 2>&1; do
+    n=$((n+1))
+    echo "dpkg/apt recovery attempt $n failed"
+    if [ "$n" -ge "$A_RETRY_MAX" ]; then
+      echo "dpkg/apt recovery failed after $A_RETRY_MAX attempts"
+      return 1
+    fi
+    sleep "$A_RETRY_WAIT"
+  done
+
+  # refresh apt state
+  sudo apt-get update -y >/dev/null 2>&1 || true
+  return 0
+}
+
+repair_dpkg_and_apt || {
+  red_echo "❌ ERROR: dpkg/apt repair failed; run 'sudo dpkg --configure -a' manually and retry."
+  exit 1
+}
+
+# -------------------------
+# Apt wrapper with retries (used for apt-get commands)
+# -------------------------
+apt_wait_and_run(){
+  local cmd="$*"
+  for i in {1..12}; do
+    sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true
+    if sudo bash -c "$cmd"; then
+      return 0
+    fi
+    sleep 3
+  done
+  red_echo "❌ apt command failed after retries: $cmd"
+  return 1
+}
 
 # -------------------------
 # Preflight detection
@@ -77,21 +149,7 @@ if marker_exists first_run_reboot_scheduled && ! marker_exists first_run_reboot_
 fi
 
 # -------------------------
-# Apt wrapper with retries
-# -------------------------
-apt_wait_and_run(){
-  local cmd="$*"
-  for i in {1..12}; do
-    sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true
-    sudo bash -c "$cmd" && return 0
-    sleep 3
-  done
-  red_echo "❌ apt command failed after retries: $cmd"
-  return 1
-}
-
-# -------------------------
-# Install unzip and curl
+# Install unzip and curl (if missing)
 # -------------------------
 if ! command -v unzip >/dev/null || ! command -v curl >/dev/null; then
   red_echo "📦 Installing unzip and curl (required)"
@@ -153,7 +211,7 @@ fi
 write_marker bun_installed
 
 # -------------------------
-# Clone node repository and install deps
+# Clone node repository (if missing) and install dependencies
 # -------------------------
 if [ ! -d "$NODE_PATH" ]; then
   red_echo "🌱 Cloning node repository into $NODE_PATH (branch: testnet)"
@@ -171,12 +229,12 @@ fi
 write_marker node_cloned
 
 # -------------------------
-# run-wrapper script
+# run-wrapper: expose Bun path for systemd
 # -------------------------
 mkdir -p "$NODE_PATH"
 cat > "$NODE_PATH/run-wrapper.sh" <<'EOF'
 #!/bin/bash
-# Expose Bun and sane PATH for systemd service
+# Ensure Bun is available in PATH when systemd runs the unit
 export BUN_INSTALL=/root/.bun
 export PATH=/root/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 cd /root/node
@@ -186,7 +244,7 @@ chmod +x "$NODE_PATH/run-wrapper.sh" || true
 write_marker run_wrapper_created
 
 # -------------------------
-# Create systemd unit
+# systemd service: demos-node
 # -------------------------
 cat > "$SYSTEMD_SERVICE" <<'EOF'
 [Unit]
@@ -215,7 +273,7 @@ systemctl enable --now demos-node.service || true
 write_marker systemd_installed
 
 # -------------------------
-# Wait for key generation
+# Wait for key generation (publickey/privatekey)
 # -------------------------
 if [ -f "$NODE_PATH/publickey" ] && [ -f "$NODE_PATH/privatekey" ]; then
   chmod 600 "$NODE_PATH/privatekey" || true
@@ -237,7 +295,7 @@ else
 fi
 
 # -------------------------
-# Configure .env and peerlist
+# Configure .env and demos_peerlist.json using detected public IP
 # -------------------------
 if ! marker_exists node_configured; then
   PUBLIC_IP="$(curl -s --max-time 5 https://api.ipify.org || echo 127.0.0.1)"
@@ -254,7 +312,7 @@ else
 fi
 
 # -------------------------
-# Port cleanup for 5332
+# Port cleanup: free up known conflicting port 5332 if in use
 # -------------------------
 if command -v lsof >/dev/null && lsof -i :5332 &>/dev/null; then
   red_echo "🧹 Freeing port 5332 (in use) to avoid conflicts"
@@ -263,7 +321,7 @@ if command -v lsof >/dev/null && lsof -i :5332 &>/dev/null; then
 fi
 
 # -------------------------
-# Restart service and verify
+# Restart the systemd service and verify
 # -------------------------
 systemctl restart demos-node.service || true
 sleep 2
@@ -274,9 +332,8 @@ else
 fi
 
 # -------------------------
-# Helper scripts (local and global)
+# Helper scripts for operators (local)
 # -------------------------
-# restart script
 cat > /root/restart_demos_node.sh <<'EOF'
 #!/bin/bash
 # Restarts demos-node service and prints status
@@ -285,7 +342,6 @@ systemctl status demos-node.service --no-pager -l
 EOF
 chmod +x /root/restart_demos_node.sh || true
 
-# backup keys script
 cat > /root/backup_demos_keys.sh <<'EOF'
 #!/bin/bash
 # Copies node keys to ~/demos-keys with 600 perms for privatekey
@@ -297,22 +353,21 @@ ls -l ~/demos-keys || true
 EOF
 chmod +x /root/backup_demos_keys.sh || true
 
-# stop script (one-step stop)
 cat > /root/stop_demos_node.sh <<'EOF'
 #!/bin/bash
 set -euo pipefail
 # Stop and disable systemd service
 sudo systemctl stop demos-node.service || true
 sudo systemctl disable --now demos-node.service || true
-# Kill any processes referencing /root/node
+# Kill any processes whose command line references /root/node
 pgrep -f "/root/node" | xargs -r sudo kill -9 || true
 pkill -f "/root/node/run" || true
-# Free ports typically used by node
+# Free common ports used by the node
 sudo lsof -ti :5332 | xargs -r sudo kill -9 || true
 sudo lsof -ti :53550 | xargs -r sudo kill -9 || true
 # Stop Docker containers containing 'demos' in their name
 sudo docker ps -q --filter "name=demos" | xargs -r sudo docker stop || true
-# Remove common pid/lock files
+# Remove leftover PID or lock files used by the installer or node
 sudo rm -f /run/demos-node.pid /var/run/demos-node.pid /root/.demos_node_setup/installer.lock || true
 # Show final service status
 sudo systemctl status demos-node.service --no-pager -l || true
@@ -320,8 +375,11 @@ echo "Stop sequence complete"
 EOF
 chmod +x /root/stop_demos_node.sh || true
 
+# -------------------------
 # Install global helper wrappers in /usr/local/bin
+# -------------------------
 mkdir -p "$GLOBAL_BIN"
+
 cat > "$GLOBAL_BIN/restart_demos_node" <<'EOF'
 #!/bin/bash
 exec /root/restart_demos_node.sh "$@"
@@ -343,7 +401,7 @@ chmod +x "$GLOBAL_BIN/stop_demos_node" || true
 write_marker helpers_created
 
 # -------------------------
-# Final marker and messages
+# Final marker and completion message
 # -------------------------
 write_marker install_complete
 red_echo "🎉 Install complete. Helper commands (available globally):"
