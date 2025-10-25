@@ -67,17 +67,17 @@ check_demos_node       # Health check with options
 
 - To restart and monitor logs:
   ```bash
-  ./restart_demos_node
+  /root/restart_demos_node
 ```
 
 - To back up your keys:
   ```bash
-  ./backup_demos_keys
+  /root/backup_demos_keys
 ```
 
 - To check node health:
   ```bash
-  ./check_demo_snode --health --logs=100
+  /root/check_demo_snode --health --logs=100
   ```
 
 - Node source: github.com/kynesyslabs/node
