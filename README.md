@@ -69,13 +69,11 @@ check_demos_node       # Health check with options
   ```bash
   ./restart_demos_node
 ```
-  `
 
 - To back up your keys:
   ```bash
   ./backup_demos_keys
 ```
-  `
 
 - To check node health:
   ```bash
