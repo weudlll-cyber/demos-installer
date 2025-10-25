@@ -73,12 +73,12 @@ check_demos_node       # Health check with options
 - To back up your keys:
   ```bash
   /root/backup_demos_keys
-```
+  ```
 
 - To check node health:
   ```bash
   /root/check_demo_snode --health --logs=100
-```
+  ```
 
 - Node source: github.com/kynesyslabs/node
 
