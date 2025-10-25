@@ -1,10 +1,5 @@
 # Demos Node Installer
 
-
-`markdown
-
-📦 Demos Node Installer
-
 This repository provides a robust, idempotent installer script for setting up a Demos Network node on Ubuntu 24.04+. It handles:
 
 - ✅ apt/dpkg lock detection and retries  
