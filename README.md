@@ -96,10 +96,20 @@ Tail last 100 lines of journal:
 /root/check_demos_node,sh --logs=100
 ```
 
+Check service + PID + optional HTTP endpoint:
+```bash
+/root/check_demos_node --health
+```
 
-```/root/check_demos_node --health```         # Check service + PID + optional HTTP endpoint
-```/root/check_demos_node --autorestart```    # Restart node if unhealthy
-```/root/check_demos_node --restart```        # Force restart
+Restart node if unhealthy:
+```bash
+/root/check_demos_node --autorestart
+```
+
+Force restart:
+```bash
+/root/check_demos_node --restart
+```
 `
 
 Monitor logs are stored at /var/log/demosnodemonitor.log.
@@ -109,9 +119,9 @@ Monitor logs are stored at /var/log/demosnodemonitor.log.
 If the installer exits early or skips steps:
 - Check /root/.demos_node_setup/ for marker files
 - Delete specific markers to re-run steps:
-  `bash
+  ```bash
   rm /root/.demos_node_setup/docker_installed
-  `
+  ```
 
 If apt locks persist:
 - Wait for background processes to finish
