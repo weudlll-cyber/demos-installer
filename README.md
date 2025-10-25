@@ -59,7 +59,7 @@ restart_demos_node     # Restart and show status
 backup_demos_keys      # Backup keys to ~/demos-keys
 stop_demos_node        # Stop service and clean up
 check_demos_node       # Health check with options
-`
+
 
 ---
 
@@ -78,7 +78,7 @@ check_demos_node       # Health check with options
 - To check node health:
   ```bash
   /root/check_demo_snode --health --logs=100
-  ```
+```
 
 - Node source: github.com/kynesyslabs/node
 
