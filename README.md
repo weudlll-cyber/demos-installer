@@ -87,10 +87,12 @@ check_demos_node       # Health check with options
 🩺 Health Check Usage
 
 Show systemd status: 
-```/root/check_demos_node --status```
+```/root/check_demos_node --status
+```
 
 Tail last 100 lines of journal:
-```/root/check_demos_node --logs=100```
+```/root/check_demos_node --logs=100
+```
 
 
 ```/root/check_demos_node --health```         # Check service + PID + optional HTTP endpoint
