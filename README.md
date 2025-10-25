@@ -77,7 +77,7 @@ check_demos_node       # Health check with options
 
 - To check node health:
   ```bash
-  /root/check_demos_node --health --logs=100
+  /root/check_demos_node.sh --health --logs=100
   ```
 
 - Node source: github.com/kynesyslabs/node
@@ -88,12 +88,12 @@ check_demos_node       # Health check with options
 
 Show systemd status: 
 ```bash
-/root/check_demos_node --status
+/root/check_demos_node.sh --status
 ```
 
 Tail last 100 lines of journal:
 ```bash
-/root/check_demos_node --logs=100
+/root/check_demos_node,sh --logs=100
 ```
 
 
