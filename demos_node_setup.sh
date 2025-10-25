@@ -3,19 +3,11 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ============================================================
-# Demos Node installer - single-file complete script
-# Features:
-# - DNS retry for raw.githubusercontent.com
-# - dpkg/apt recovery (wait, kill stale, remove locks, dpkg --configure -a, apt -f)
-# - apt wrapper with retries
-# - one-time reboot with visible 15s delay and markers to resume
-# - installs unzip, curl, Docker, Bun
-# - clones node repo, installs deps (bun/npm)
-# - creates run-wrapper and systemd unit
-# - waits for key generation, writes .env and demos_peerlist.json
-# - frees conflicting port, restarts service
-# - creates helper scripts and global wrappers in /usr/local/bin
-# - logs to /root/.demos_node_setup/install.log
+# Demos Node installer + health-check
+# - All previous features (DNS wait, dpkg/apt recovery, 15s reboot)
+# - Installs unzip/curl, Docker, Bun, clones node, systemd unit
+# - Adds monitoring script: /root/check_demos_node.sh
+# - Adds global wrapper: /usr/local/bin/check_demos_node
 # ============================================================
 
 # -------------------------
@@ -30,6 +22,7 @@ FIRST_REBOOT_MARKER="${MARKER_DIR}/.first_reboot_pending"
 LOCKFILE="$MARKER_DIR/installer.lock"
 BUN_PROFILE="/etc/profile.d/bun.sh"
 GLOBAL_BIN="/usr/local/bin"
+MONITOR_LOG="/var/log/demos_node_monitor.log"
 
 mkdir -p "$TMP_DIR"
 chmod 700 "$MARKER_DIR" "$TMP_DIR" 2>/dev/null || true
@@ -70,10 +63,7 @@ A_RETRY_MAX=6
 A_RETRY_WAIT=5
 
 repair_dpkg_and_apt() {
-  # stop automatic apt timers
   sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true
-
-  # wait briefly for running apt/dpkg to finish
   for i in $(seq 1 $A_RETRY_MAX); do
     if pgrep -x dpkg >/dev/null || pgrep -x apt >/dev/null || pgrep -x apt-get >/dev/null; then
       echo "Waiting for dpkg/apt to finish (attempt $i/$A_RETRY_MAX)..."
@@ -82,8 +72,6 @@ repair_dpkg_and_apt() {
       break
     fi
   done
-
-  # if still running, kill stale processes
   if pgrep -x dpkg >/dev/null || pgrep -x apt >/dev/null || pgrep -x apt-get >/dev/null; then
     echo "Stale dpkg/apt processes detected; killing them"
     sudo pkill -9 dpkg || true
@@ -91,13 +79,9 @@ repair_dpkg_and_apt() {
     sudo pkill -9 apt-get || true
     sleep 1
   fi
-
-  # remove lock files when safe
   if ! pgrep -x dpkg >/dev/null && ! pgrep -x apt >/dev/null && ! pgrep -x apt-get >/dev/null; then
     sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock || true
   fi
-
-  # run dpkg/apt repair with retries
   local n=0
   until sudo dpkg --configure -a >/dev/null 2>&1 && sudo apt-get install -f -y >/dev/null 2>&1; do
     n=$((n+1))
@@ -108,7 +92,6 @@ repair_dpkg_and_apt() {
     fi
     sleep "$A_RETRY_WAIT"
   done
-
   sudo apt-get update -y >/dev/null 2>&1 || true
   return 0
 }
@@ -384,6 +367,124 @@ EOF
 chmod +x /root/stop_demos_node.sh || true
 
 # -------------------------
+# Health-check / monitor script
+# - Checks systemd service, PID, logs, and optional HTTP health endpoint
+# - Returns exit code 0 when healthy, >0 when unhealthy
+# - Optional automatic restart when --autorestart provided
+# -------------------------
+cat > /root/check_demos_node.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+NODE_DIR="/root/node"
+SERVICE="demos-node.service"
+MON_LOG="/var/log/demos_node_monitor.log"
+HEALTH_URL="http://127.0.0.1:53550/health"
+AUTORESTART=0
+
+usage() {
+  echo "Usage: $0 [--status] [--logs N] [--health] [--autorestart] [--restart]"
+  echo "  --status      : show systemd status"
+  echo "  --logs N      : tail last N lines of journal (default 50)"
+  echo "  --health      : query local health endpoint"
+  echo "  --autorestart : if unhealthy, restart service automatically"
+  echo "  --restart     : force restart the service"
+  exit 1
+}
+
+# parse args
+TAIL_LINES=50
+for arg in "$@"; do
+  case "$arg" in
+    --status) ACTION_STATUS=1 ;;
+    --logs) ACTION_LOGS=1 ;;
+    --health) ACTION_HEALTH=1 ;;
+    --autorestart) AUTORESTART=1 ;;
+    --restart) ACTION_RESTART=1 ;;
+    --logs=*) TAIL_LINES="${arg#*=}" ;;
+    --help) usage ;;
+    *) ;;
+  esac
+done
+
+log(){ echo "[$(date '+%F %T')] $*" | tee -a "$MON_LOG"; }
+
+# status
+if [ "${ACTION_STATUS:-0}" = "1" ]; then
+  systemctl status "$SERVICE" --no-pager -l
+fi
+
+# logs
+if [ "${ACTION_LOGS:-0}" = "1" ]; then
+  journalctl -u "$SERVICE" -n "$TAIL_LINES" --no-pager
+fi
+
+# restart
+if [ "${ACTION_RESTART:-0}" = "1" ]; then
+  log "Manual restart requested"
+  sudo systemctl restart "$SERVICE"
+  sleep 2
+  systemctl is-active --quiet "$SERVICE" && log "Service restarted and active" || log "Service not active after restart"
+  exit 0
+fi
+
+# health checks (service + pid + optional HTTP)
+HEALTH_OK=0
+if systemctl is-active --quiet "$SERVICE"; then
+  log "systemd reports $SERVICE running"
+  HEALTH_OK=1
+else
+  log "systemd reports $SERVICE NOT running"
+  HEALTH_OK=0
+fi
+
+# pid check
+if pgrep -f "/root/node" >/dev/null 2>&1; then
+  log "Process referencing /root/node exists"
+  HEALTH_OK=$((HEALTH_OK+1))
+else
+  log "No process referencing /root/node"
+fi
+
+# optional HTTP health endpoint check (non-fatal if curl not present)
+if command -v curl >/dev/null 2>&1; then
+  if curl -sSf --max-time 3 "$HEALTH_URL" >/dev/null 2>&1; then
+    log "HTTP health endpoint OK: $HEALTH_URL"
+    HEALTH_OK=$((HEALTH_OK+1))
+  else
+    log "HTTP health endpoint failed or not present: $HEALTH_URL"
+  fi
+else
+  log "curl not present, skipped HTTP health check"
+fi
+
+# evaluate
+if [ "$HEALTH_OK" -ge 2 ]; then
+  log "Node appears HEALTHY (score=$HEALTH_OK)"
+  exit 0
+else
+  log "Node UNHEALTHY (score=$HEALTH_OK)"
+  if [ "$AUTORESTART" -eq 1 ]; then
+    log "Auto-restart enabled: restarting $SERVICE"
+    sudo systemctl restart "$SERVICE"
+    sleep 3
+    if systemctl is-active --quiet "$SERVICE"; then
+      log "Service active after auto-restart"
+      exit 0
+    else
+      log "Service still not active after auto-restart"
+      exit 2
+    fi
+  fi
+  exit 2
+fi
+EOF
+chmod +x /root/check_demos_node.sh || true
+sudo touch "$MONITOR_LOG" >/dev/null 2>&1 || true
+sudo chown root:root "$MONITOR_LOG" || true
+sudo chmod 644 "$MONITOR_LOG" || true
+
+# -------------------------
 # Global wrappers in /usr/local/bin
 # -------------------------
 mkdir -p "$GLOBAL_BIN"
@@ -405,6 +506,12 @@ exec /root/stop_demos_node.sh "$@"
 EOF
 chmod +x "$GLOBAL_BIN/stop_demos_node" || true
 
+cat > "$GLOBAL_BIN/check_demos_node" <<'EOF'
+#!/bin/bash
+exec /root/check_demos_node.sh "$@"
+EOF
+chmod +x "$GLOBAL_BIN/check_demos_node" || true
+
 write_marker helpers_created
 
 # -------------------------
@@ -415,7 +522,9 @@ red_echo "🎉 Install complete. Global helper commands:"
 red_echo "  restart_demos_node   - restart node and show status"
 red_echo "  backup_demos_keys    - copy keys to ~/demos-keys"
 red_echo "  stop_demos_node      - stop service, kill processes, free ports"
-red_echo "ℹ️ Local helper scripts in /root/: restart_demos_node.sh, backup_demos_keys.sh, stop_demos_node.sh"
+red_echo "  check_demos_node     - run health checks; supports --status --logs=N --health --autorestart --restart"
+red_echo "ℹ️ Local scripts in /root/: restart_demos_node.sh, backup_demos_keys.sh, stop_demos_node.sh, check_demos_node.sh"
+red_echo "ℹ️ Monitor log: $MONITOR_LOG"
 red_echo "ℹ️ Marker files are in $MARKER_DIR. Remove a marker to re-run a step."
 
-# End of script
+# End of installer
