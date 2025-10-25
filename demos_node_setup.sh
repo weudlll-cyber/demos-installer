@@ -3,22 +3,23 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ============================================================
-# Demos Node installer - complete single-file script
-# - idempotent markers for each step
-# - one-time reboot with visible 15s delay
-# - dpkg/apt recovery before any apt work
-# - apt-lock tolerant: stops apt timers and retries
-# - installs Docker, Bun, unzip, curl
+# Demos Node installer - single-file complete script
+# Features:
+# - DNS retry for raw.githubusercontent.com
+# - dpkg/apt recovery (wait, kill stale, remove locks, dpkg --configure -a, apt -f)
+# - apt wrapper with retries
+# - one-time reboot with visible 15s delay and markers to resume
+# - installs unzip, curl, Docker, Bun
 # - clones node repo, installs deps (bun/npm)
 # - creates run-wrapper and systemd unit
 # - waits for key generation, writes .env and demos_peerlist.json
 # - frees conflicting port, restarts service
-# - creates helper scripts and installs them to /usr/local/bin
-# - all user-facing output printed in bright red for visibility
+# - creates helper scripts and global wrappers in /usr/local/bin
+# - logs to /root/.demos_node_setup/install.log
 # ============================================================
 
 # -------------------------
-# Paths and marker files
+# Paths and markers
 # -------------------------
 MARKER_DIR="/root/.demos_node_setup"
 TMP_DIR="${MARKER_DIR}/tmp"
@@ -46,16 +47,33 @@ exec 200>"$LOCKFILE"
 flock -n 200 || { red_echo "❌ Another installer run is active. Exiting."; exit 1; }
 
 # -------------------------
+# DNS check for GitHub raw (retry)
+# -------------------------
+DNS_OK=0
+for i in {1..12}; do
+  if ping -c 1 -W 2 raw.githubusercontent.com >/dev/null 2>&1; then
+    red_echo "✅ DNS resolution OK: raw.githubusercontent.com"
+    DNS_OK=1
+    break
+  fi
+  red_echo "⏳ Waiting for DNS resolution (attempt $i/12)..."
+  sleep 3
+done
+if [ "$DNS_OK" -ne 1 ]; then
+  red_echo "⚠️ DNS still failing for raw.githubusercontent.com; you may run the script again when network is ready."
+fi
+
+# -------------------------
 # dpkg/apt recovery (idempotent)
 # -------------------------
 A_RETRY_MAX=6
 A_RETRY_WAIT=5
 
 repair_dpkg_and_apt() {
-  # stop automatic apt timers that can interfere
+  # stop automatic apt timers
   sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true
 
-  # wait a short while for any active apt/dpkg to finish
+  # wait briefly for running apt/dpkg to finish
   for i in $(seq 1 $A_RETRY_MAX); do
     if pgrep -x dpkg >/dev/null || pgrep -x apt >/dev/null || pgrep -x apt-get >/dev/null; then
       echo "Waiting for dpkg/apt to finish (attempt $i/$A_RETRY_MAX)..."
@@ -65,7 +83,7 @@ repair_dpkg_and_apt() {
     fi
   done
 
-  # forcibly terminate stale apt/dpkg processes only if still present after waiting
+  # if still running, kill stale processes
   if pgrep -x dpkg >/dev/null || pgrep -x apt >/dev/null || pgrep -x apt-get >/dev/null; then
     echo "Stale dpkg/apt processes detected; killing them"
     sudo pkill -9 dpkg || true
@@ -74,12 +92,12 @@ repair_dpkg_and_apt() {
     sleep 1
   fi
 
-  # remove lock files only when no dpkg/apt processes running
+  # remove lock files when safe
   if ! pgrep -x dpkg >/dev/null && ! pgrep -x apt >/dev/null && ! pgrep -x apt-get >/dev/null; then
     sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock || true
   fi
 
-  # run dpkg repair and dependency fix with retries
+  # run dpkg/apt repair with retries
   local n=0
   until sudo dpkg --configure -a >/dev/null 2>&1 && sudo apt-get install -f -y >/dev/null 2>&1; do
     n=$((n+1))
@@ -91,7 +109,6 @@ repair_dpkg_and_apt() {
     sleep "$A_RETRY_WAIT"
   done
 
-  # refresh apt state
   sudo apt-get update -y >/dev/null 2>&1 || true
   return 0
 }
@@ -102,7 +119,7 @@ repair_dpkg_and_apt || {
 }
 
 # -------------------------
-# Apt wrapper with retries (used for apt-get commands)
+# apt wrapper with retries
 # -------------------------
 apt_wait_and_run(){
   local cmd="$*"
@@ -120,23 +137,23 @@ apt_wait_and_run(){
 # -------------------------
 # Preflight detection
 # -------------------------
-red_echo "🔍 Preflight check: scanning system for existing components..."
-if command -v unzip >/dev/null && command -v curl >/dev/null; then red_echo "✅ unzip and curl installed"; else red_echo "❌ unzip or curl missing"; fi
-if command -v docker >/dev/null; then red_echo "✅ Docker installed: $(docker --version 2>/dev/null || echo 'unknown')"; else red_echo "❌ Docker not found"; fi
-if command -v bun >/dev/null; then red_echo "✅ Bun installed: $(bun --version 2>/dev/null || echo 'unknown')"; else red_echo "❌ Bun not found"; fi
+red_echo "🔍 Preflight check..."
+if command -v unzip >/dev/null && command -v curl >/dev/null; then red_echo "✅ unzip and curl present"; else red_echo "❌ unzip or curl missing"; fi
+if command -v docker >/dev/null; then red_echo "✅ Docker detected"; else red_echo "❌ Docker not found"; fi
+if command -v bun >/dev/null; then red_echo "✅ Bun detected"; else red_echo "❌ Bun not found"; fi
 [ -d "$NODE_PATH" ] && red_echo "✅ Node repo exists at $NODE_PATH" || red_echo "❌ Node repo missing"
-systemctl list-units --type=service | grep -q demos-node.service && red_echo "✅ Systemd service registered" || red_echo "❌ Systemd service missing"
+systemctl list-units --type=service | grep -q demos-node.service && red_echo "✅ Systemd service present" || red_echo "❌ Systemd service missing"
 [ -f "$NODE_PATH/publickey" ] && [ -f "$NODE_PATH/privatekey" ] && red_echo "✅ Node keys found" || red_echo "❌ Node keys missing"
-red_echo "🧪 Preflight complete. Proceeding..."
+red_echo "🧪 Preflight done"
 
 # -------------------------
-# One-time reboot logic
+# One-time reboot logic (15s warning)
 # -------------------------
 if ! marker_exists first_run_reboot_done && ! marker_exists first_run_reboot_scheduled; then
   write_marker first_run_reboot_scheduled
   touch "$FIRST_REBOOT_MARKER"
   red_echo "🚨 One-time reboot in 15s to finalize system upgrades"
-  red_echo "After reboot, re-run this script or run the same curl command you used."
+  red_echo "After reboot, re-run this script or use the same curl command"
   sleep 15
   reboot
   exit 0
@@ -149,35 +166,35 @@ if marker_exists first_run_reboot_scheduled && ! marker_exists first_run_reboot_
 fi
 
 # -------------------------
-# Install unzip and curl (if missing)
+# Install unzip and curl
 # -------------------------
 if ! command -v unzip >/dev/null || ! command -v curl >/dev/null; then
-  red_echo "📦 Installing unzip and curl (required)"
+  red_echo "📦 Installing unzip and curl"
   apt_wait_and_run "apt-get update -y"
   apt_wait_and_run "apt-get install -y unzip curl"
 else
-  red_echo "⏭️ Skipping unzip and curl install — already present"
+  red_echo "⏭️ Skipping unzip/curl install"
 fi
 write_marker unzip_installed
 
 # -------------------------
-# System update and base packages
+# System update and base deps
 # -------------------------
 if ! marker_exists system_updated; then
-  red_echo "📦 Updating system packages and installing base deps"
+  red_echo "📦 Updating system and installing base packages"
   apt_wait_and_run "apt-get update -y"
   apt_wait_and_run "apt-get upgrade -y"
   apt_wait_and_run "apt-get install -y ca-certificates gnupg lsb-release wget git build-essential jq lsof software-properties-common gpg"
   write_marker system_updated
 else
-  red_echo "⏭️ Skipping system update — already marked complete"
+  red_echo "⏭️ System update already done"
 fi
 
 # -------------------------
-# Docker install (if missing)
+# Docker install
 # -------------------------
 if ! command -v docker >/dev/null; then
-  red_echo "📦 Installing Docker (docker-ce, containerd)"
+  red_echo "📦 Installing Docker"
   apt_wait_and_run "apt-get remove -y docker docker-engine docker.io containerd runc || true"
   sudo install -m 0755 -d /etc/apt/keyrings || true
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
@@ -186,15 +203,15 @@ if ! command -v docker >/dev/null; then
   apt_wait_and_run "apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin"
   sudo systemctl enable --now docker || true
 else
-  red_echo "⏭️ Skipping Docker install — already present"
+  red_echo "⏭️ Docker already installed"
 fi
 write_marker docker_installed
 
 # -------------------------
-# Bun install (if missing)
+# Bun install
 # -------------------------
 if ! command -v bun >/dev/null; then
-  red_echo "📦 Installing Bun (JavaScript runtime/package manager)"
+  red_echo "📦 Installing Bun"
   curl -fsSL https://bun.sh/install | bash || true
   if [ -d "$HOME/.bun/bin" ]; then
     cat > "$BUN_PROFILE" <<'EOF'
@@ -206,17 +223,17 @@ EOF
     export PATH="$HOME/.bun/bin:$PATH"
   fi
 else
-  red_echo "⏭️ Skipping Bun install — already present"
+  red_echo "⏭️ Bun already present"
 fi
 write_marker bun_installed
 
 # -------------------------
-# Clone node repository (if missing) and install dependencies
+# Clone node repository and install deps
 # -------------------------
 if [ ! -d "$NODE_PATH" ]; then
-  red_echo "🌱 Cloning node repository into $NODE_PATH (branch: testnet)"
+  red_echo "🌱 Cloning node repository (branch: testnet)"
   git clone -b testnet https://github.com/kynesyslabs/node.git "$NODE_PATH" || {
-    red_echo "❌ Git clone failed; please check network and repo URL"
+    red_echo "❌ Git clone failed; check network or repo URL"
   }
   if [ -d "$NODE_PATH" ]; then
     pushd "$NODE_PATH" >/dev/null
@@ -224,17 +241,16 @@ if [ ! -d "$NODE_PATH" ]; then
     popd >/dev/null
   fi
 else
-  red_echo "⏭️ Skipping node clone — $NODE_PATH already exists"
+  red_echo "⏭️ Node repo already cloned"
 fi
 write_marker node_cloned
 
 # -------------------------
-# run-wrapper: expose Bun path for systemd
+# run-wrapper for systemd
 # -------------------------
 mkdir -p "$NODE_PATH"
 cat > "$NODE_PATH/run-wrapper.sh" <<'EOF'
 #!/bin/bash
-# Ensure Bun is available in PATH when systemd runs the unit
 export BUN_INSTALL=/root/.bun
 export PATH=/root/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 cd /root/node
@@ -244,7 +260,7 @@ chmod +x "$NODE_PATH/run-wrapper.sh" || true
 write_marker run_wrapper_created
 
 # -------------------------
-# systemd service: demos-node
+# systemd service
 # -------------------------
 cat > "$SYSTEMD_SERVICE" <<'EOF'
 [Unit]
@@ -273,14 +289,14 @@ systemctl enable --now demos-node.service || true
 write_marker systemd_installed
 
 # -------------------------
-# Wait for key generation (publickey/privatekey)
+# Wait for key generation
 # -------------------------
 if [ -f "$NODE_PATH/publickey" ] && [ -f "$NODE_PATH/privatekey" ]; then
   chmod 600 "$NODE_PATH/privatekey" || true
   write_marker keys_generated
-  red_echo "✅ Node keys already present"
+  red_echo "✅ Node keys present"
 else
-  red_echo "⏳ Waiting for node to generate keys (up to 60s)..."
+  red_echo "⏳ Waiting up to 60s for node to generate keys"
   for i in {1..60}; do
     [ -f "$NODE_PATH/publickey" ] && [ -f "$NODE_PATH/privatekey" ] && break
     sleep 1
@@ -288,19 +304,19 @@ else
   if [ -f "$NODE_PATH/publickey" ] && [ -f "$NODE_PATH/privatekey" ]; then
     chmod 600 "$NODE_PATH/privatekey" || true
     write_marker keys_generated
-    red_echo "✅ Keys detected and secured"
+    red_echo "✅ Keys detected"
   else
-    red_echo "⚠️ Keys not found after wait; continue and check node logs later"
+    red_echo "⚠️ Keys not detected after wait; check node logs later"
   fi
 fi
 
 # -------------------------
-# Configure .env and demos_peerlist.json using detected public IP
+# .env and demos_peerlist.json
 # -------------------------
 if ! marker_exists node_configured; then
   PUBLIC_IP="$(curl -s --max-time 5 https://api.ipify.org || echo 127.0.0.1)"
   log "Detected public IP: $PUBLIC_IP"
-  red_echo "🌐 Using public IP: $PUBLIC_IP for .env and peerlist"
+  red_echo "🌐 Writing .env and demos_peerlist.json using $PUBLIC_IP"
   echo "EXPOSED_URL=http://$PUBLIC_IP:53550" > "$NODE_PATH/.env"
   if [ -f "$NODE_PATH/publickey" ]; then
     PUBKEY="$(tr -d '\r\n' < "$NODE_PATH/publickey")"
@@ -308,35 +324,34 @@ if ! marker_exists node_configured; then
   fi
   write_marker node_configured
 else
-  red_echo "⏭️ Skipping .env and peerlist configuration — already configured"
+  red_echo "⏭️ Node already configured"
 fi
 
 # -------------------------
-# Port cleanup: free up known conflicting port 5332 if in use
+# Free port 5332 if occupied
 # -------------------------
 if command -v lsof >/dev/null && lsof -i :5332 &>/dev/null; then
-  red_echo "🧹 Freeing port 5332 (in use) to avoid conflicts"
+  red_echo "🧹 Freeing port 5332"
   lsof -t -i :5332 | xargs -r kill || true
   sleep 2
 fi
 
 # -------------------------
-# Restart the systemd service and verify
+# Restart service and verify
 # -------------------------
 systemctl restart demos-node.service || true
 sleep 2
 if systemctl is-active --quiet demos-node.service; then
   red_echo "✅ Node service is active"
 else
-  red_echo "⚠️ Node service is not active — check logs: journalctl -u demos-node.service -n 200 --no-pager"
+  red_echo "⚠️ Node service not active — inspect: journalctl -u demos-node.service -n 200 --no-pager"
 fi
 
 # -------------------------
-# Helper scripts for operators (local)
+# Helper scripts (local)
 # -------------------------
 cat > /root/restart_demos_node.sh <<'EOF'
 #!/bin/bash
-# Restarts demos-node service and prints status
 systemctl restart demos-node.service
 systemctl status demos-node.service --no-pager -l
 EOF
@@ -344,7 +359,6 @@ chmod +x /root/restart_demos_node.sh || true
 
 cat > /root/backup_demos_keys.sh <<'EOF'
 #!/bin/bash
-# Copies node keys to ~/demos-keys with 600 perms for privatekey
 mkdir -p ~/demos-keys
 cp /root/node/publickey ~/demos-keys/publickey 2>/dev/null || true
 cp /root/node/privatekey ~/demos-keys/privatekey 2>/dev/null || true
@@ -356,30 +370,23 @@ chmod +x /root/backup_demos_keys.sh || true
 cat > /root/stop_demos_node.sh <<'EOF'
 #!/bin/bash
 set -euo pipefail
-# Stop and disable systemd service
 sudo systemctl stop demos-node.service || true
 sudo systemctl disable --now demos-node.service || true
-# Kill any processes whose command line references /root/node
 pgrep -f "/root/node" | xargs -r sudo kill -9 || true
 pkill -f "/root/node/run" || true
-# Free common ports used by the node
 sudo lsof -ti :5332 | xargs -r sudo kill -9 || true
 sudo lsof -ti :53550 | xargs -r sudo kill -9 || true
-# Stop Docker containers containing 'demos' in their name
 sudo docker ps -q --filter "name=demos" | xargs -r sudo docker stop || true
-# Remove leftover PID or lock files used by the installer or node
 sudo rm -f /run/demos-node.pid /var/run/demos-node.pid /root/.demos_node_setup/installer.lock || true
-# Show final service status
 sudo systemctl status demos-node.service --no-pager -l || true
 echo "Stop sequence complete"
 EOF
 chmod +x /root/stop_demos_node.sh || true
 
 # -------------------------
-# Install global helper wrappers in /usr/local/bin
+# Global wrappers in /usr/local/bin
 # -------------------------
 mkdir -p "$GLOBAL_BIN"
-
 cat > "$GLOBAL_BIN/restart_demos_node" <<'EOF'
 #!/bin/bash
 exec /root/restart_demos_node.sh "$@"
@@ -401,14 +408,14 @@ chmod +x "$GLOBAL_BIN/stop_demos_node" || true
 write_marker helpers_created
 
 # -------------------------
-# Final marker and completion message
+# Finalize
 # -------------------------
 write_marker install_complete
-red_echo "🎉 Install complete. Helper commands (available globally):"
-red_echo "  restart_demos_node   - restart node and view status"
-red_echo "  backup_demos_keys    - copy keys to ~/demos-keys (check perms)"
-red_echo "  stop_demos_node      - stop service, kill processes, free ports (one-step)"
-red_echo "ℹ️ Local helper scripts also available in /root/: restart_demos_node.sh, backup_demos_keys.sh, stop_demos_node.sh"
-red_echo "ℹ️ Marker files located in $MARKER_DIR. Remove specific marker files to re-run particular steps."
+red_echo "🎉 Install complete. Global helper commands:"
+red_echo "  restart_demos_node   - restart node and show status"
+red_echo "  backup_demos_keys    - copy keys to ~/demos-keys"
+red_echo "  stop_demos_node      - stop service, kill processes, free ports"
+red_echo "ℹ️ Local helper scripts in /root/: restart_demos_node.sh, backup_demos_keys.sh, stop_demos_node.sh"
+red_echo "ℹ️ Marker files are in $MARKER_DIR. Remove a marker to re-run a step."
 
 # End of script
