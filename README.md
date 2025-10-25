@@ -93,22 +93,22 @@ Show systemd status:
 
 Tail last 100 lines of journal:
 ```bash
-/root/check_demos_node,sh --logs=100
+/root/check_demos_node.sh --logs=100
 ```
 
 Check service + PID + optional HTTP endpoint:
 ```bash
-/root/check_demos_node --health
+/root/check_demos_node.sh --health
 ```
 
 Restart node if unhealthy:
 ```bash
-/root/check_demos_node --autorestart
+/root/check_demos_node.sh --autorestart
 ```
 
 Force restart:
 ```bash
-/root/check_demos_node --restart
+/root/check_demos_node.sh --restart
 ```
 `
 
