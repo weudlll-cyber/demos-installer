@@ -103,12 +103,24 @@ fi
 
 # 3) One-time reboot scheduling
 if ! marker_exists first_run_reboot_done && ! marker_exists first_run_reboot_scheduled; then
-  log "Scheduling one-time reboot in 15s to finalize upgrades"
+  log "Scheduling one-time reboot in 30s to finalize upgrades"
   write_marker first_run_reboot_scheduled
   touch "$FIRST_REBOOT_MARKER"
   echo -e "\n\033[1;41m  !!! ONE-TIME REBOOT IN 15s TO FINALIZE SETUP !!!  \033[0m"
-  echo "After reboot wait ~60s then re-run: ~/demos_node_setup.sh"
-  sleep 15
+  echo
+  echo "After the reboot you can continue the installer in one of two ways depending on how you launched it:"
+  echo
+  echo "1) If you downloaded the script and saved it locally on the machine:"
+  echo "     cd ~"
+  echo "     chmod +x ./demos_node_setup.sh    # if needed"
+  echo "     ./demos_node_setup.sh"
+  echo
+  echo "2) If you used the GitHub one-liner (curl | bash) originally:"
+  echo "     curl -s https://raw.githubusercontent.com/weudlll-cyber/demos-installer/main/demos_node_setup.sh | bash"
+  echo
+  echo "If you are unsure, option 1 is the safest when the script file is present on the machine."
+  echo
+  sleep 30
   reboot
   exit 0
 fi
@@ -117,6 +129,12 @@ if marker_exists first_run_reboot_scheduled && ! marker_exists first_run_reboot_
   write_marker first_run_reboot_done
   rm -f "$FIRST_REBOOT_MARKER" || true
   log "Post-reboot: continuing install"
+  # Remind user again post-reboot which options exist (useful when run interactively)
+  echo
+  echo "Post-reboot note: to continue or re-run the installer you can choose one of these:"
+  echo "  - If you have the file locally: ./demos_node_setup.sh"
+  echo "  - Or re-run from GitHub: curl -s https://raw.githubusercontent.com/weudlll-cyber/demos-installer/main/demos_node_setup.sh | bash"
+  echo
 fi
 
 # 4) Install Docker
