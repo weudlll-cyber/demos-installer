@@ -19,7 +19,7 @@ This repository provides a robust, idempotent installer script for setting up a 
 To install a Demos node in one step:
 
 `bash
-curl -s https://raw.githubusercontent.com/weudlll-cyber/demos-installer/main/demosnodesetup.sh | bash
+curl -s https://raw.githubusercontent.com/weudlll-cyber/demos-installer/main/demos_node_setup.sh | bash
 `
 
 > 💡 The script will automatically reboot once to finalize system upgrades.  
@@ -35,8 +35,8 @@ curl -s https://raw.githubusercontent.com/weudlll-cyber/demos-installer/main/dem
 - Red output: All user-facing messages are printed in red for visibility.
 - Public IP detection: Automatically configures .env and demos_peerlist.json.
 - Helper scripts:
-  - /root/restartdemosnode.sh: Restart and view logs
-  - /root/backupdemoskeys.sh: Backup your node keys
+  - /root/restart_demos_node.sh: Restart and view logs
+  - /root/backup_demos_keys.sh: Backup your node keys
 
 ---
 
@@ -44,12 +44,12 @@ curl -s https://raw.githubusercontent.com/weudlll-cyber/demos-installer/main/dem
 
 - To restart and monitor logs:
   `bash
-  /root/restartdemosnode.sh
+  /root/restart_demos_node.sh
   `
 
 - To back up your keys:
   `bash
-  /root/backupdemoskeys.sh
+  /root/backup_demos_keys.sh
   `
 
 - Node source: github.com/kynesyslabs/node
@@ -59,10 +59,10 @@ curl -s https://raw.githubusercontent.com/weudlll-cyber/demos-installer/main/dem
 🛠️ Troubleshooting
 
 If the installer exits early or skips steps:
-- Check /root/.demosnodesetup/ for marker files
+- Check /root/.demos_node_setup/ for marker files
 - Delete specific markers to re-run steps:
   `bash
-  rm /root/.demosnodesetup/docker_installed
+  rm /root/.demos_node_setup/docker_installed
   `
 
 If apt locks persist:
