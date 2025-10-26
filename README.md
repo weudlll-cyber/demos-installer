@@ -47,11 +47,11 @@ These are installed locally and globally:
 
 | Script                      | Description                                      |
 |-----------------------------|--------------------------------------------------|
-| /root/demos_node_setup.sh   | Full installer script                            |
-| /root/restart_demos_node.sh | Restart the node and show systemd status         |
-| /root/backup_demos_keys.sh  | Copy keys to ~/demos-keys with secure perms      |
-| /root/stop_demos_node.sh    | Stop service, kill processes, free ports         |
-| /root/check_demos_node.sh   | Health-check tool with restart and log options   |
+| demos_node_setup.sh         | Full installer script                            |
+| restart_demos_node.sh       | Restart the node and show systemd status         |
+| backup_demos_keys.sh        | Copy keys to ~/demos-keys with secure perms      |
+| stop_demos_node.sh          | Stop service, kill processes, free ports         |
+| check_demos_node.sh         | Health-check tool with restart and log options   |
 
 Global wrappers (available anywhere):
 
