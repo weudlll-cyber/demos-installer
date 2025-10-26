@@ -5,6 +5,7 @@ IFS=$'\n\t'
 # demos_node_setup.sh
 # Fully standalone installer with:
 # - robust apt/dpkg lock handling and automatic apt --fix-broken install
+# - safe killing of apt/dpkg processes (no pkill argument error)
 # - installs unzip/curl, Docker, Bun
 # - clones node repo (testnet branch) and installs deps
 # - creates run-wrapper and systemd service
@@ -69,10 +70,14 @@ prepare_apt_environment(){
   # Try to gently stop common timers/services
   systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true
 
-  # Kill any stale apt/dpkg processes if they still exist (last resort)
+  # Kill any stale apt/dpkg processes if they still exist (last resort) - safe per-process kill
   if pgrep -x apt >/dev/null || pgrep -x apt-get >/dev/null || pgrep -x dpkg >/dev/null; then
     red "⚠️ [WARN] Forcibly killing lingering apt/dpkg processes"
-    pkill -9 apt apt-get dpkg || true
+    for p in apt apt-get dpkg; do
+      for pid in $(pgrep -x "$p" 2>/dev/null || true); do
+        kill -9 "$pid" 2>/dev/null || true
+      done
+    done
     sleep 1
   fi
 
@@ -90,9 +95,11 @@ prepare_apt_environment(){
   # If system suggests fix-broken, run it automatically and retry update
   if ! apt-get -s upgrade >/dev/null 2>&1; then
     red "ℹ️ [INFO] apt simulation reported issues; attempting apt --fix-broken install"
-    apt --fix-broken install -y || {
+    if apt --fix-broken install -y; then
+      red "✅ [OK] apt --fix-broken install completed"
+    else
       red "❌ [APT] apt --fix-broken install failed; please run manually: apt --fix-broken install -y"
-    }
+    fi
     dpkg --configure -a >/dev/null 2>&1 || true
     apt-get update -y >/dev/null 2>&1 || true
   fi
