@@ -2,19 +2,17 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# demos_node_setup.sh
 # Fully standalone installer that:
 # - repairs apt/dpkg
 # - installs unzip/curl, Docker, Bun
-# - clones the node repo
+# - clones node repo (testnet branch)
 # - installs node deps (bun preferred, fallback npm)
-# - creates systemd unit and run wrapper
-# - waits for keys, writes .env and peerlist
-# - creates embedded helper scripts and global symlinks (no external downloads)
-# - writes markers so steps are idempotent
+# - creates run-wrapper and systemd unit
+# - waits for keys and writes .env + demos_peerlist.json
+# - creates embedded helper scripts and global symlinks
+# - prints every major step in red for visibility and debugging
 #
-# Usage:
-# curl -fsSL <raw-url> -o /root/demos_node_setup.sh && chmod +x /root/demos_node_setup.sh && bash /root/demos_node_setup.sh
+# Usage (recommended): curl -fsSL <raw-url> -o /root/demos_node_setup.sh && chmod +x /root/demos_node_setup.sh && bash /root/demos_node_setup.sh
 
 MARKER_DIR="/root/.demos_node_setup"
 TMP_DIR="${MARKER_DIR}/tmp"
@@ -26,27 +24,31 @@ BUN_PROFILE="/etc/profile.d/bun.sh"
 HELPER_DIR="/root/demos_helpers"
 GLOBAL_BIN="/usr/local/bin"
 MONITOR_LOG="/var/log/demos_node_monitor.log"
-RAW_INSTALLER_URL="" # optional: set if you publish this script
 LOCAL_INSTALLER_PATH="/root/demos_node_setup.sh"
 
 mkdir -p "$MARKER_DIR" "$TMP_DIR" "$HELPER_DIR"
 chmod 700 "$MARKER_DIR" "$TMP_DIR" 2>/dev/null || true
 
-log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"; }
 red(){ echo -e "\033[1;31m$*\033[0m"; }
+log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"; }
+
 write_marker(){ printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" > "$TMP_DIR/$1.tmp" && mv -f "$TMP_DIR/$1.tmp" "$MARKER_DIR/$1" && sync; }
 marker_exists(){ [ -f "$MARKER_DIR/$1" ]; }
 
 # Prevent parallel runs
 exec 200>"$LOCKFILE"
-flock -n 200 || { red "Another installer run is active. Exiting."; exit 1; }
+flock -n 200 || { red "❌ [LOCK] Another installer run is active. Exiting."; exit 1; }
 
-# Repair apt/dpkg (idempotent)
+# Utility: apt with retries
+apt_run(){ local cmd="$*"; for i in {1..8}; do systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true; if bash -c "$cmd"; then return 0; fi; sleep 3; done; red "❌ [APT] Command failed after retries: $cmd"; return 1; }
+
+# Repair dpkg/apt (idempotent)
+red "🔧 [STEP] Repairing apt/dpkg (idempotent)"
 repair_dpkg_and_apt(){
   systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true
   for i in {1..6}; do
     if pgrep -x dpkg >/dev/null || pgrep -x apt >/dev/null || pgrep -x apt-get >/dev/null; then
-      log "Waiting for apt/dpkg (attempt $i/6)..."
+      red "⏳ [WAIT] Waiting for apt/dpkg (attempt $i/6)..."
       sleep 3
     else
       break
@@ -59,50 +61,52 @@ repair_dpkg_and_apt(){
 }
 repair_dpkg_and_apt
 
-apt_run(){ local cmd="$*"; for i in {1..8}; do systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true; if bash -c "$cmd"; then return 0; fi; sleep 3; done; red "apt command failed after retries: $cmd"; return 1; }
-
 # Install unzip and curl
 if ! marker_exists unzip_installed; then
+  red "🔧 [STEP] Ensuring unzip and curl are installed"
   if ! command -v unzip >/dev/null || ! command -v curl >/dev/null; then
-    log "Installing unzip and curl"
     apt_run "apt-get update -y"
     apt_run "apt-get install -y unzip curl"
+    red "✅ [OK] unzip/curl installed"
   else
-    log "unzip and curl already present"
+    red "⏭️ [SKIP] unzip and curl already present"
   fi
   write_marker unzip_installed
 fi
 
 # Base system packages
 if ! marker_exists system_updated; then
-  log "Updating system and installing base packages"
+  red "🔧 [STEP] Updating system and installing base packages"
   apt_run "apt-get update -y"
   apt_run "apt-get upgrade -y"
   apt_run "apt-get install -y ca-certificates gnupg lsb-release wget git build-essential jq lsof software-properties-common gpg"
+  red "✅ [OK] Base packages installed"
   write_marker system_updated
 fi
 
 # Install Docker if missing
 if ! marker_exists docker_installed; then
+  red "🔧 [STEP] Installing Docker (if missing)"
   if ! command -v docker >/dev/null; then
-    log "Installing Docker"
     apt_run "apt-get remove -y docker docker-engine docker.io containerd runc || true"
     install -m 0755 -d /etc/apt/keyrings || true
-    curl -fsSL https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg || true
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$(. /etc/os-release && echo "$ID") $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+    OS_ID=$(awk -F= '/^ID=/ {gsub(/"/,"",$2); print $2; exit}' /etc/os-release || echo ubuntu)
+    curl -fsSL https://download.docker.com/linux/$OS_ID/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg || true
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS_ID $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
     apt_run "apt-get update -y"
     apt_run "apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin" || true
     systemctl enable --now docker || true
+    red "✅ [OK] Docker installed or enabled"
   else
-    log "Docker already installed"
+    red "⏭️ [SKIP] Docker already installed"
   fi
   write_marker docker_installed
 fi
 
 # Install Bun (best-effort)
 if ! marker_exists bun_installed; then
+  red "🔧 [STEP] Installing Bun (best-effort)"
   if ! command -v bun >/dev/null; then
-    log "Installing Bun (best-effort)"
     curl -fsSL https://bun.sh/install | bash || true
     if [ -d "$HOME/.bun/bin" ]; then
       cat > "$BUN_PROFILE" <<'BUNENV'
@@ -112,48 +116,58 @@ BUNENV
       chmod 644 "$BUN_PROFILE" || true
       export BUN_INSTALL="$HOME/.bun"
       export PATH="$HOME/.bun/bin:$PATH"
+      red "✅ [OK] Bun installed and PATH updated"
+    else
+      red "⚠️ [WARN] Bun installer finished but $HOME/.bun not found; continuing"
     fi
   else
-    log "bun already present"
+    red "⏭️ [SKIP] bun already present"
   fi
   write_marker bun_installed
 fi
 
 # Clone node repo
 if ! marker_exists node_cloned; then
+  red "🔧 [STEP] Cloning node repository (branch: testnet)"
   if [ ! -d "$NODE_PATH" ]; then
-    log "Cloning node repository (branch: testnet)"
-    git clone -b testnet https://github.com/kynesyslabs/node.git "$NODE_PATH" || { red "Git clone failed"; }
+    if git clone -b testnet https://github.com/kynesyslabs/node.git "$NODE_PATH"; then
+      red "✅ [OK] Node repository cloned"
+    else
+      red "❌ [ERROR] Git clone failed — check network or repo URL"
+    fi
   else
-    log "Node directory already exists"
+    red "⏭️ [SKIP] Node directory already exists"
   fi
   write_marker node_cloned
 fi
 
-# Install node dependencies (bun preferred, fallback npm)
+# Install node dependencies
 if ! marker_exists deps_installed; then
   if [ -d "$NODE_PATH" ]; then
     pushd "$NODE_PATH" >/dev/null
-    log "Installing node dependencies (bun preferred, fallback npm)"
+    red "🔧 [STEP] Installing node dependencies (bun preferred, fallback npm)"
     if command -v bun >/dev/null; then
       if bun install 2>&1 | tee "$TMP_DIR/bun_install.log"; then
-        log "bun install completed"
+        red "✅ [OK] bun install completed"
       else
-        red "bun install reported issues; attempting recovery"
+        red "⚠️ [WARN] bun install had issues; trying recovery"
         bun pm untrusted --yes >/dev/null 2>&1 || bun pm untrusted || true
         bun install 2>&1 | tee -a "$TMP_DIR/bun_install.log" || true
       fi
     else
-      log "bun not found; falling back to npm install"
+      red "ℹ️ [INFO] bun not found; falling back to npm install"
       npm install || true
     fi
     popd >/dev/null
+  else
+    red "❌ [ERROR] Node directory missing; cannot install deps"
   fi
   write_marker deps_installed
 fi
 
 # Create run-wrapper
 if ! marker_exists run_wrapper_created; then
+  red "🔧 [STEP] Creating run-wrapper"
   mkdir -p "$NODE_PATH"
   cat > "$NODE_PATH/run-wrapper.sh" <<'RWH'
 #!/bin/bash
@@ -163,11 +177,13 @@ cd /root/node
 exec /bin/bash ./run
 RWH
   chmod +x "$NODE_PATH/run-wrapper.sh" || true
+  red "✅ [OK] run-wrapper created"
   write_marker run_wrapper_created
 fi
 
 # Create systemd service
 if ! marker_exists systemd_installed; then
+  red "🔧 [STEP] Creating systemd service for demos-node"
   cat > "$SYSTEMD_SERVICE" <<'SVC'
 [Unit]
 Description=Demos Node
@@ -189,20 +205,21 @@ Environment=BUN_INSTALL=/root/.bun
 [Install]
 WantedBy=multi-user.target
 SVC
-
   systemctl daemon-reload || true
   systemctl enable --now demos-node.service || true
+  red "✅ [OK] systemd unit installed and started (if possible)"
   write_marker systemd_installed
 fi
 
 # Wait up to 60s for keys
 if ! marker_exists keys_generated; then
+  red "🔧 [STEP] Checking for node key generation"
   if [ -f "$NODE_PATH/publickey" ] && [ -f "$NODE_PATH/privatekey" ]; then
     chmod 600 "$NODE_PATH/privatekey" || true
     write_marker keys_generated
-    log "Node keys present"
+    red "✅ [OK] Node keys already present"
   else
-    log "Waiting up to 60s for node to generate keys"
+    red "⏳ [WAIT] Waiting up to 60s for node to generate keys..."
     for i in {1..60}; do
       [ -f "$NODE_PATH/publickey" ] && [ -f "$NODE_PATH/privatekey" ] && break
       sleep 1
@@ -210,42 +227,56 @@ if ! marker_exists keys_generated; then
     if [ -f "$NODE_PATH/publickey" ] && [ -f "$NODE_PATH/privatekey" ]; then
       chmod 600 "$NODE_PATH/privatekey" || true
       write_marker keys_generated
-      log "Keys detected"
+      red "✅ [OK] Keys detected after wait"
     else
-      red "Keys not detected after wait; check node logs later"
+      red "❌ [ERROR] Keys not detected after 60s"
+      red "    ▶ Check node logs: journalctl -u demos-node.service -n 200 --no-pager"
+      red "    ▶ Run health script: check_demos_node --health --logs=100"
+      red "    ▶ Manually inspect: ls -l /root/node"
+      # do not exit; continue to create helpers and allow debugging
     fi
   fi
 fi
 
-# Write .env and demos_peerlist.json (idempotent)
+# Write .env and demos_peerlist.json
 if ! marker_exists node_configured; then
+  red "🔧 [STEP] Writing .env and demos_peerlist.json"
   PUBLIC_IP="$(curl -s --max-time 5 https://api.ipify.org || echo 127.0.0.1)"
   log "Detected public IP: $PUBLIC_IP"
+  red "🔍 [INFO] Detected public IP: $PUBLIC_IP"
   echo "EXPOSED_URL=http://$PUBLIC_IP:53550" > "$NODE_PATH/.env"
   if [ -f "$NODE_PATH/publickey" ]; then
     PUBKEY="$(tr -d '\r\n' < "$NODE_PATH/publickey")"
     printf '{"%s":"http://%s:53550"}\n' "$PUBKEY" "$PUBLIC_IP" > "$NODE_PATH/demos_peerlist.json"
+  else
+    red "⚠️ [WARN] publickey not present; peerlist will not include pubkey"
+    printf '{}\n' > "$NODE_PATH/demos_peerlist.json"
   fi
   write_marker node_configured
+  red "✅ [OK] Node config written"
 fi
 
 # Free port 5332 if occupied
 if command -v lsof >/dev/null && lsof -i :5332 &>/dev/null; then
-  log "Freeing port 5332"
+  red "🔧 [STEP] Freeing port 5332"
   lsof -t -i :5332 | xargs -r kill || true
   sleep 2
+  red "✅ [OK] Port 5332 freed (if it was occupied)"
 fi
 
-# Restart service and check
+# Restart and quick service check
+red "🔧 [STEP] Restarting demos-node service"
 systemctl restart demos-node.service || true
 sleep 2
 if systemctl is-active --quiet demos-node.service; then
-  log "Node service is active"
+  red "✅ [OK] Node service is active"
 else
-  red "Node service not active — inspect: journalctl -u demos-node.service -n 200 --no-pager"
+  red "⚠️ [WARN] Node service not active — inspect logs"
+  red "    journalctl -u demos-node.service -n 200 --no-pager"
 fi
 
 # Create helper scripts (embedded, idempotent)
+red "🔧 [STEP] Creating embedded helper scripts and symlinks"
 create_helpers(){
   mkdir -p "$HELPER_DIR" "$GLOBAL_BIN" || true
 
@@ -328,29 +359,29 @@ HC
   # Ensure monitor log exists
   touch "$MONITOR_LOG" || true; chown root:root "$MONITOR_LOG" || true; chmod 644 "$MONITOR_LOG" || true
 
-  # Symlink helpers to /usr/local/bin (overwrite dangling links)
+  # Create symlinks (overwrite dangling links)
   ln -sf "$HELPER_DIR/restart_demos_node.sh" "$GLOBAL_BIN/restart_demos_node"
   ln -sf "$HELPER_DIR/backup_demos_keys.sh" "$GLOBAL_BIN/backup_demos_keys"
   ln -sf "$HELPER_DIR/stop_demos_node.sh" "$GLOBAL_BIN/stop_demos_node"
   ln -sf "$HELPER_DIR/check_demos_node.sh" "$GLOBAL_BIN/check_demos_node"
   chmod 755 "$GLOBAL_BIN/restart_demos_node" "$GLOBAL_BIN/backup_demos_keys" "$GLOBAL_BIN/stop_demos_node" "$GLOBAL_BIN/check_demos_node" || true
 
-  echo "Helpers installed to $HELPER_DIR and symlinked to $GLOBAL_BIN"
+  red "✅ [OK] Helpers installed to $HELPER_DIR and symlinked to $GLOBAL_BIN"
 }
 
 create_helpers
 write_marker helpers_created
 
-# Save a local copy of the installer (best-effort) if RAW_INSTALLER_URL is set
-if [ -n "$RAW_INSTALLER_URL" ]; then
-  if command -v curl >/dev/null 2>&1; then
-    log "Saving a local copy of the installer to $LOCAL_INSTALLER_PATH"
-    curl -fsSL "$RAW_INSTALLER_URL" -o "$LOCAL_INSTALLER_PATH" || log "Could not download raw installer to $LOCAL_INSTALLER_PATH"
-    chmod +x "$LOCAL_INSTALLER_PATH" || true
-  fi
+# Save local copy of installer (best-effort)
+if command -v curl >/dev/null 2>&1; then
+  red "🔧 [STEP] Saving a local copy of the installer to $LOCAL_INSTALLER_PATH"
+  cp "$0" "$LOCAL_INSTALLER_PATH" 2>/dev/null || true
+  chmod +x "$LOCAL_INSTALLER_PATH" || true
+  red "✅ [OK] Installer saved locally"
 fi
 
 write_marker install_complete
-red "Full install complete."
-red "Global commands: restart_demos_node backup_demos_keys stop_demos_node check_demos_node"
+red "🎉 [DONE] Full install complete."
+red "🔗 Global commands: restart_demos_node backup_demos_keys stop_demos_node check_demos_node"
+red "📁 Markers: $MARKER_DIR — remove a marker to re-run a step"
 exit 0
