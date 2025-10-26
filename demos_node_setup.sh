@@ -2,7 +2,7 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# Fully standalone installer that:
+# Fully standalone installer
 # - repairs apt/dpkg
 # - installs unzip/curl, Docker, Bun
 # - clones node repo (testnet branch)
@@ -10,9 +10,22 @@ IFS=$'\n\t'
 # - creates run-wrapper and systemd unit
 # - waits for keys and writes .env + demos_peerlist.json
 # - creates embedded helper scripts and global symlinks
-# - prints every major step in red for visibility and debugging
+# - prints every major step in red for visibility
+# - saves a local copy of the installer robustly (no harmless chmod error)
+# - triggers a reboot automatically if certain steps require it (see NOTE)
 #
-# Usage (recommended): curl -fsSL <raw-url> -o /root/demos_node_setup.sh && chmod +x /root/demos_node_setup.sh && bash /root/demos_node_setup.sh
+# NOTE about reboot behaviour: This script WILL perform a reboot automatically
+# if it determines a reboot is necessary from performed actions (system upgrade,
+# Docker install, kernel/package conditions). It will announce the reboot in red
+# and wait 15s before calling reboot. You asked for this behavior explicitly.
+#
+# Usage:
+#  curl -fsSL <raw-url> -o /root/demos_node_setup.sh && chmod +x /root/demos_node_setup.sh && bash /root/demos_node_setup.sh
+#  OR
+#  curl -fsSL <raw-url> | bash
+#
+# If you run the piped form, the script will still try to save a local copy using
+# RAW_INSTALLER_URL if you set it below.
 
 MARKER_DIR="/root/.demos_node_setup"
 TMP_DIR="${MARKER_DIR}/tmp"
@@ -26,6 +39,10 @@ GLOBAL_BIN="/usr/local/bin"
 MONITOR_LOG="/var/log/demos_node_monitor.log"
 LOCAL_INSTALLER_PATH="/root/demos_node_setup.sh"
 
+# If you run via pipe and you have published the raw URL, set it here before running.
+# e.g.: RAW_INSTALLER_URL="https://raw.githubusercontent.com/weudlll-cyber/demos-installer/main/demos_node_setup.sh"
+RAW_INSTALLER_URL=""
+
 mkdir -p "$MARKER_DIR" "$TMP_DIR" "$HELPER_DIR"
 chmod 700 "$MARKER_DIR" "$TMP_DIR" 2>/dev/null || true
 
@@ -34,6 +51,10 @@ log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"; }
 
 write_marker(){ printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" > "$TMP_DIR/$1.tmp" && mv -f "$TMP_DIR/$1.tmp" "$MARKER_DIR/$1" && sync; }
 marker_exists(){ [ -f "$MARKER_DIR/$1" ]; }
+
+# Track whether actions require a reboot
+NEED_REBOOT=0
+mark_reboot_needed(){ NEED_REBOOT=1; write_marker "reboot_required"; }
 
 # Prevent parallel runs
 exec 200>"$LOCKFILE"
@@ -74,17 +95,22 @@ if ! marker_exists unzip_installed; then
   write_marker unzip_installed
 fi
 
-# Base system packages
+# Base system packages (this may include kernel or important packages)
 if ! marker_exists system_updated; then
   red "🔧 [STEP] Updating system and installing base packages"
   apt_run "apt-get update -y"
   apt_run "apt-get upgrade -y"
+  # If upgrade installed packages that may require reboot, detect /var/run/reboot-required
+  if [ -f /var/run/reboot-required ]; then
+    red "⚠️ [REBOOT] Packages updated require reboot"
+    mark_reboot_needed
+  fi
   apt_run "apt-get install -y ca-certificates gnupg lsb-release wget git build-essential jq lsof software-properties-common gpg"
   red "✅ [OK] Base packages installed"
   write_marker system_updated
 fi
 
-# Install Docker if missing
+# Install Docker if missing (Docker apt install sometimes triggers service/kmod changes)
 if ! marker_exists docker_installed; then
   red "🔧 [STEP] Installing Docker (if missing)"
   if ! command -v docker >/dev/null; then
@@ -94,9 +120,17 @@ if ! marker_exists docker_installed; then
     curl -fsSL https://download.docker.com/linux/$OS_ID/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg || true
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS_ID $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
     apt_run "apt-get update -y"
-    apt_run "apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin" || true
-    systemctl enable --now docker || true
-    red "✅ [OK] Docker installed or enabled"
+    if apt_run "apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin"; then
+      systemctl enable --now docker || true
+      red "✅ [OK] Docker installed or enabled"
+      # Installing containerd/docker may require a reboot on some kernels or cgroup changes
+      if [ -f /var/run/reboot-required ]; then
+        red "⚠️ [REBOOT] Docker or containerd triggered reboot-required"
+        mark_reboot_needed
+      fi
+    else
+      red "⚠️ [WARN] Docker install reported issues; continuing"
+    fi
   else
     red "⏭️ [SKIP] Docker already installed"
   fi
@@ -233,7 +267,7 @@ if ! marker_exists keys_generated; then
       red "    ▶ Check node logs: journalctl -u demos-node.service -n 200 --no-pager"
       red "    ▶ Run health script: check_demos_node --health --logs=100"
       red "    ▶ Manually inspect: ls -l /root/node"
-      # do not exit; continue to create helpers and allow debugging
+      # continue; allow user to debug
     fi
   fi
 fi
@@ -372,16 +406,40 @@ HC
 create_helpers
 write_marker helpers_created
 
-# Save local copy of installer (best-effort)
-if command -v curl >/dev/null 2>&1; then
-  red "🔧 [STEP] Saving a local copy of the installer to $LOCAL_INSTALLER_PATH"
-  cp "$0" "$LOCAL_INSTALLER_PATH" 2>/dev/null || true
-  chmod +x "$LOCAL_INSTALLER_PATH" || true
-  red "✅ [OK] Installer saved locally"
+# Save local copy of the installer robustly (avoid chmod warning)
+red "🔧 [STEP] Saving a local copy of the installer (if possible)"
+if [ -f "$0" ]; then
+  # $0 is a file on disk (script executed from file)
+  cp -f "$0" "$LOCAL_INSTALLER_PATH" 2>/dev/null || true
+  chmod +x "$LOCAL_INSTALLER_PATH" 2>/dev/null || true
+  red "✅ [OK] Installer saved locally at $LOCAL_INSTALLER_PATH"
+elif [ -n "$RAW_INSTALLER_URL" ]; then
+  # Attempt to fetch from RAW_INSTALLER_URL if provided (useful when piped)
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsSL "$RAW_INSTALLER_URL" -o "$LOCAL_INSTALLER_PATH"; then
+      chmod +x "$LOCAL_INSTALLER_PATH" 2>/dev/null || true
+      red "✅ [OK] Installer downloaded and saved to $LOCAL_INSTALLER_PATH"
+    else
+      red "⚠️ [WARN] Could not download installer from RAW_INSTALLER_URL"
+    fi
+  else
+    red "⚠️ [WARN] curl not available to download installer copy"
+  fi
+else
+  red "⚠️ [SKIP] No local script file detected and RAW_INSTALLER_URL not set; skipping save"
 fi
 
 write_marker install_complete
 red "🎉 [DONE] Full install complete."
 red "🔗 Global commands: restart_demos_node backup_demos_keys stop_demos_node check_demos_node"
 red "📁 Markers: $MARKER_DIR — remove a marker to re-run a step"
+
+# If a reboot is needed, announce and reboot after short delay
+if [ "$NEED_REBOOT" -eq 1 ]; then
+  red "🔁 [REBOOT] A reboot is required to complete installation. Rebooting in 15 seconds."
+  red "    If you want to avoid automatic reboot next time, edit the installer to remove mark_reboot_needed() calls."
+  sleep 15
+  reboot
+fi
+
 exit 0
