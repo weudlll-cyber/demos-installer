@@ -98,29 +98,28 @@ check_demos_node       # Health check with options
 
 Show systemd status: 
 ```bash
-/root/check_demos_node.sh --status
+check_demos_node --status
 ```
 
 Tail last 100 lines of journal:
 ```bash
-/root/check_demos_node.sh --logs=100
+check_demos_node --logs=100
 ```
 
 Check service + PID + optional HTTP endpoint:
 ```bash
-/root/check_demos_node.sh --health
+check_demos_node --health
 ```
 
 Restart node if unhealthy:
 ```bash
-/root/check_demos_node.sh --autorestart
+check_demos_node --autorestart
 ```
 
 Force restart:
 ```bash
-/root/check_demos_node.sh --restart
+check_demos_node --restart
 ```
-`
 
 Monitor logs are stored at /var/log/demosnodemonitor.log.
 
