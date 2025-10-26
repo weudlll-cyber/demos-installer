@@ -7,10 +7,10 @@ IFS=$'\n\t'
 # clones node, fixes Bun postinstalls, creates systemd unit, starts node,
 # installs helper scripts and global wrappers, saves a local copy of this installer.
 #
-# Run:
-# curl -fsSL https://raw.githubusercontent.com/weudlll-cyber/demos-installer/main/demos_node_setup.sh | bash
-# or:
-# curl -fsSL https://raw.githubusercontent.com/weudlll-cyber/demos-installer/main/demos_node_setup.sh -o /root/demos_node_setup.sh && chmod +x /root/demos_node_setup.sh && bash /root/demos_node_setup.sh
+# Usage:
+# curl -fsSL https://raw.githubusercontent.com/<your-username>/<repo>/main/demos_node_setup.sh -o /root/demos_node_setup.sh && chmod +x /root/demos_node_setup.sh && bash /root/demos_node_setup.sh
+# or (pipe):
+# curl -fsSL https://raw.githubusercontent.com/<your-username>/<repo>/main/demos_node_setup.sh | bash
 
 MARKER_DIR="/root/.demos_node_setup"
 TMP_DIR="${MARKER_DIR}/tmp"
@@ -27,7 +27,7 @@ RAW_INSTALLER_URL="https://raw.githubusercontent.com/weudlll-cyber/demos-install
 HELPERS_INSTALLER_PATH="$HELPER_DIR/install_helpers.sh"
 LOCAL_INSTALLER_PATH="/root/demos_node_setup.sh"
 
-mkdir -p "$TMP_DIR" "$HELPER_DIR"
+mkdir -p "$MARKER_DIR" "$TMP_DIR" "$HELPER_DIR"
 chmod 700 "$MARKER_DIR" "$TMP_DIR" 2>/dev/null || true
 
 log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"; }
@@ -230,7 +230,7 @@ systemctl daemon-reload
 systemctl enable --now demos-node.service || true
 write_marker systemd_installed
 
-# Wait for key generation
+# Wait for key generation (up to 60s)
 if [ -f "$NODE_PATH/publickey" ] && [ -f "$NODE_PATH/privatekey" ]; then
   chmod 600 "$NODE_PATH/privatekey" || true
   write_marker keys_generated
@@ -281,7 +281,7 @@ else
   red "⚠️ Node service not active — inspect: journalctl -u demos-node.service -n 200 --no-pager"
 fi
 
-# Minimal helpers (created so installer can run helpers installer)
+# Minimal helpers (created so helpers installer can run)
 cat > "$HELPER_DIR/restart_demos_node.sh" <<'EOF'
 #!/bin/bash
 systemctl restart demos-node.service
@@ -376,7 +376,7 @@ log(){ echo "[$(date '+%F %T')] $*" | tee -a "$MON_LOG"; }
 
 if [ "${ACTION_STATUS:-0}" = "1" ]; then systemctl status "$SERVICE" --no-pager -l; fi
 if [ "${ACTION_LOGS:-0}" = "1" ]; then journalctl -u "$SERVICE" -n "$TAIL_LINES" --no-pager; fi
-if [ "${ACTION_RESTART:-0}" = "1" ]; then log "Manual restart requested"; systemctl.restart "$SERVICE" >/dev/null 2>&1 || systemctl restart "$SERVICE"; sleep 2; systemctl is-active --quiet "$SERVICE" && log "Service active after restart" || log "Service not active after restart"; exit 0; fi
+if [ "${ACTION_RESTART:-0}" = "1" ]; then log "Manual restart requested"; systemctl restart "$SERVICE"; sleep 2; systemctl is-active --quiet "$SERVICE" && log "Service active after restart" || log "Service not active after restart"; exit 0; fi
 
 HEALTH_OK=0
 if systemctl is-active --quiet "$SERVICE"; then log "systemd reports $SERVICE running"; HEALTH_OK=1; else log "systemd reports $SERVICE NOT running"; HEALTH_OK=0; fi
