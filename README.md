@@ -47,11 +47,11 @@ These are installed locally and globally:
 
 | Script                      | Description                                      |
 |-----------------------------|--------------------------------------------------|
-| demos_node_setup.sh         | Full installer script                            |
-| restart_demos_node.sh       | Restart the node and show systemd status         |
-| backup_demos_keys.sh        | Copy keys to ~/demos-keys with secure perms      |
-| stop_demos_node.sh          | Stop service, kill processes, free ports         |
-| check_demos_node.sh         | Health-check tool with restart and log options   |
+| demos_node_setup            | Full installer script                            |
+| restart_demos_node          | Restart the node and show systemd status         |
+| backup_demos_keys           | Copy keys to ~/demos-keys with secure perms      |
+| stop_demos_node             | Stop service, kill processes, free ports         |
+| check_demos_node            | Health-check tool with restart and log options   |
 
 Global wrappers (available anywhere):
 
@@ -67,22 +67,22 @@ check_demos_node       # Health check with options
 
 - To restart and monitor logs:
   ```bash
-  restart_demos_node.sh
+  restart_demos_node
   ```
 
 - To back up your keys:
   ```bash
-  backup_demos_keys.sh
+  backup_demos_keys
   ```
 
 - To stop your demos node:
   ```bash
-  stop_demos_node.sh
+  stop_demos_node
   ```
 
 - To check node health:
   ```bash
-  check_demos_node.sh --health --logs=100
+  check_demos_node --health --logs=100
   ```
 
 - Node source: github.com/kynesyslabs/node
