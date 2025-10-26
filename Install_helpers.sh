@@ -3,7 +3,8 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # install_helpers.sh
-# Installs full helper scripts, health-check, and global wrappers.
+# Creates helper scripts in /root/demos_helpers and symlinks them into /usr/local/bin
+# Usage: bash /root/demos_helpers/install_helpers.sh
 
 HELPER_DIR="/root/demos_helpers"
 GLOBAL_BIN="/usr/local/bin"
@@ -14,21 +15,23 @@ mkdir -p "$HELPER_DIR" "$GLOBAL_BIN" || true
 # restart helper
 cat > "$HELPER_DIR/restart_demos_node.sh" <<'EOF'
 #!/bin/bash
+set -euo pipefail
 systemctl restart demos-node.service
 systemctl status demos-node.service --no-pager -l
 EOF
-chmod +x "$HELPER_DIR/restart_demos_node.sh"
+chmod 755 "$HELPER_DIR/restart_demos_node.sh"
 
 # backup keys
 cat > "$HELPER_DIR/backup_demos_keys.sh" <<'EOF'
 #!/bin/bash
+set -euo pipefail
 mkdir -p ~/demos-keys
 cp /root/node/publickey ~/demos-keys/publickey 2>/dev/null || true
 cp /root/node/privatekey ~/demos-keys/privatekey 2>/dev/null || true
 chmod 600 ~/demos-keys/privatekey 2>/dev/null || true
 ls -l ~/demos-keys || true
 EOF
-chmod +x "$HELPER_DIR/backup_demos_keys.sh"
+chmod 700 "$HELPER_DIR/backup_demos_keys.sh"
 
 # stop helper
 cat > "$HELPER_DIR/stop_demos_node.sh" <<'EOF'
@@ -45,7 +48,7 @@ rm -f /run/demos-node.pid /var/run/demos-node.pid /root/.demos_node_setup/instal
 systemctl status demos-node.service --no-pager -l || true
 echo "Stop sequence complete"
 EOF
-chmod +x "$HELPER_DIR/stop_demos_node.sh"
+chmod 755 "$HELPER_DIR/stop_demos_node.sh"
 
 # health-check script
 cat > "$HELPER_DIR/check_demos_node.sh" <<'EOF'
@@ -87,16 +90,16 @@ else log "curl not present, skipped HTTP health check"; fi
 
 if [ "$HEALTH_OK" -ge 2 ]; then log "Node appears HEALTHY (score=$HEALTH_OK)"; exit 0; else log "Node UNHEALTHY (score=$HEALTH_OK)"; if [ "$AUTORESTART" -eq 1 ]; then log "Auto-restart enabled"; systemctl restart "$SERVICE"; sleep 3; systemctl is-active --quiet "$SERVICE" && log "Service active after auto-restart" && exit 0 || log "Still not active" && exit 2; fi; exit 2; fi
 EOF
-chmod +x "$HELPER_DIR/check_demos_node.sh"
+chmod 755 "$HELPER_DIR/check_demos_node.sh"
 
-# install global wrappers
-ln -sf "$HELPER_DIR/restart_demos_node.sh" /usr/local/bin/restart_demos_node
-ln -sf "$HELPER_DIR/backup_demos_keys.sh" /usr/local/bin/backup_demos_keys
-ln -sf "$HELPER_DIR/stop_demos_node.sh" /usr/local/bin/stop_demos_node
-ln -sf "$HELPER_DIR/check_demos_node.sh" /usr/local/bin/check_demos_node
-chmod +x /usr/local/bin/restart_demos_node /usr/local/bin/backup_demos_keys /usr/local/bin/stop_demos_node /usr/local/bin/check_demos_node || true
+# Symlink helpers to /usr/local/bin (overwrite dangling links)
+ln -sf "$HELPER_DIR/restart_demos_node.sh" "$GLOBAL_BIN/restart_demos_node"
+ln -sf "$HELPER_DIR/backup_demos_keys.sh" "$GLOBAL_BIN/backup_demos_keys"
+ln -sf "$HELPER_DIR/stop_demos_node.sh" "$GLOBAL_BIN/stop_demos_node"
+ln -sf "$HELPER_DIR/check_demos_node.sh" "$GLOBAL_BIN/check_demos_node"
+chmod 755 "$GLOBAL_BIN/restart_demos_node" "$GLOBAL_BIN/backup_demos_keys" "$GLOBAL_BIN/stop_demos_node" "$GLOBAL_BIN/check_demos_node" || true
 
-# ensure monitor log exists
+# Ensure monitor log exists
 touch "$MONITOR_LOG" || true; chown root:root "$MONITOR_LOG" || true; chmod 644 "$MONITOR_LOG" || true
 
-echo "Helpers installed. Global commands: restart_demos_node backup_demos_keys stop_demos_node check_demos_node"
+echo "Helpers installed to $HELPER_DIR and symlinked to $GLOBAL_BIN"
