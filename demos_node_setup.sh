@@ -2,30 +2,24 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# Fully standalone installer
-# - repairs apt/dpkg
+# demos_node_setup.sh
+# Fully standalone installer with:
+# - robust apt/dpkg lock handling and automatic apt --fix-broken install
 # - installs unzip/curl, Docker, Bun
-# - clones node repo (testnet branch)
-# - installs node deps (bun preferred, fallback npm)
-# - creates run-wrapper and systemd unit
+# - clones node repo (testnet branch) and installs deps
+# - creates run-wrapper and systemd service
 # - waits for keys and writes .env + demos_peerlist.json
-# - creates embedded helper scripts and global symlinks
+# - embeds helper scripts and symlinks them globally
 # - prints every major step in red for visibility
-# - saves a local copy of the installer robustly (no harmless chmod error)
-# - triggers a reboot automatically if certain steps require it (see NOTE)
+# - saves a local copy of the installer (no chmod warning when piped)
+# - reboots automatically if triggered by package installs (announced in red)
 #
-# NOTE about reboot behaviour: This script WILL perform a reboot automatically
-# if it determines a reboot is necessary from performed actions (system upgrade,
-# Docker install, kernel/package conditions). It will announce the reboot in red
-# and wait 15s before calling reboot. You asked for this behavior explicitly.
+# Usage (recommended):
+#   curl -fsSL <raw-url> -o /root/demos_node_setup.sh && chmod +x /root/demos_node_setup.sh && bash /root/demos_node_setup.sh
+# Or piped (script will attempt to save a local copy if RAW_INSTALLER_URL is set):
+#   curl -fsSL <raw-url> | bash
 #
-# Usage:
-#  curl -fsSL <raw-url> -o /root/demos_node_setup.sh && chmod +x /root/demos_node_setup.sh && bash /root/demos_node_setup.sh
-#  OR
-#  curl -fsSL <raw-url> | bash
-#
-# If you run the piped form, the script will still try to save a local copy using
-# RAW_INSTALLER_URL if you set it below.
+# If you run piped and want the script saved locally, set RAW_INSTALLER_URL to the raw file URL.
 
 MARKER_DIR="/root/.demos_node_setup"
 TMP_DIR="${MARKER_DIR}/tmp"
@@ -38,9 +32,6 @@ HELPER_DIR="/root/demos_helpers"
 GLOBAL_BIN="/usr/local/bin"
 MONITOR_LOG="/var/log/demos_node_monitor.log"
 LOCAL_INSTALLER_PATH="/root/demos_node_setup.sh"
-
-# If you run via pipe and you have published the raw URL, set it here before running.
-# e.g.: RAW_INSTALLER_URL="https://raw.githubusercontent.com/weudlll-cyber/demos-installer/main/demos_node_setup.sh"
 RAW_INSTALLER_URL=""
 
 mkdir -p "$MARKER_DIR" "$TMP_DIR" "$HELPER_DIR"
@@ -52,7 +43,6 @@ log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"; }
 write_marker(){ printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" > "$TMP_DIR/$1.tmp" && mv -f "$TMP_DIR/$1.tmp" "$MARKER_DIR/$1" && sync; }
 marker_exists(){ [ -f "$MARKER_DIR/$1" ]; }
 
-# Track whether actions require a reboot
 NEED_REBOOT=0
 mark_reboot_needed(){ NEED_REBOOT=1; write_marker "reboot_required"; }
 
@@ -60,57 +50,92 @@ mark_reboot_needed(){ NEED_REBOOT=1; write_marker "reboot_required"; }
 exec 200>"$LOCKFILE"
 flock -n 200 || { red "❌ [LOCK] Another installer run is active. Exiting."; exit 1; }
 
-# Utility: apt with retries
+# apt-run with retries helper
 apt_run(){ local cmd="$*"; for i in {1..8}; do systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true; if bash -c "$cmd"; then return 0; fi; sleep 3; done; red "❌ [APT] Command failed after retries: $cmd"; return 1; }
 
-# Repair dpkg/apt (idempotent)
-red "🔧 [STEP] Repairing apt/dpkg (idempotent)"
-repair_dpkg_and_apt(){
-  systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true
-  for i in {1..6}; do
-    if pgrep -x dpkg >/dev/null || pgrep -x apt >/dev/null || pgrep -x apt-get >/dev/null; then
-      red "⏳ [WAIT] Waiting for apt/dpkg (attempt $i/6)..."
-      sleep 3
+# Robust handling: wait/remove apt locks and run fix-broken if necessary
+prepare_apt_environment(){
+  red "🔧 [STEP] Preparing apt environment: clearing locks and detecting running apt processes"
+  # Wait for brief time for any distro jobs to finish
+  for i in {1..10}; do
+    if pgrep -x apt >/dev/null || pgrep -x apt-get >/dev/null || pgrep -x dpkg >/dev/null; then
+      red "⏳ [WAIT] apt/dpkg busy (attempt $i/10), sleeping 2s..."
+      sleep 2
     else
       break
     fi
   done
-  rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock || true
-  pkill -9 dpkg apt apt-get 2>/dev/null || true
+
+  # Try to gently stop common timers/services
+  systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true
+
+  # Kill any stale apt/dpkg processes if they still exist (last resort)
+  if pgrep -x apt >/dev/null || pgrep -x apt-get >/dev/null || pgrep -x dpkg >/dev/null; then
+    red "⚠️ [WARN] Forcibly killing lingering apt/dpkg processes"
+    pkill -9 apt apt-get dpkg || true
+    sleep 1
+  fi
+
+  # Remove lockfiles that block dpkg frontend (only if no apt/dpkg processes)
+  if ! pgrep -x apt >/dev/null && ! pgrep -x apt-get >/dev/null && ! pgrep -x dpkg >/dev/null; then
+    rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock || true
+  else
+    red "⚠️ [WARN] apt/dpkg processes still detected, skipping lockfile removal"
+  fi
+
+  # Reconfigure dpkg and update lists
   dpkg --configure -a >/dev/null 2>&1 || true
   apt-get update -y >/dev/null 2>&1 || true
+
+  # If system suggests fix-broken, run it automatically and retry update
+  if ! apt-get -s upgrade >/dev/null 2>&1; then
+    red "ℹ️ [INFO] apt simulation reported issues; attempting apt --fix-broken install"
+    apt --fix-broken install -y || {
+      red "❌ [APT] apt --fix-broken install failed; please run manually: apt --fix-broken install -y"
+    }
+    dpkg --configure -a >/dev/null 2>&1 || true
+    apt-get update -y >/dev/null 2>&1 || true
+  fi
 }
-repair_dpkg_and_apt
+
+prepare_apt_environment
 
 # Install unzip and curl
 if ! marker_exists unzip_installed; then
   red "🔧 [STEP] Ensuring unzip and curl are installed"
   if ! command -v unzip >/dev/null || ! command -v curl >/dev/null; then
     apt_run "apt-get update -y"
-    apt_run "apt-get install -y unzip curl"
-    red "✅ [OK] unzip/curl installed"
+    if apt_run "apt-get install -y unzip curl"; then
+      red "✅ [OK] unzip/curl installed"
+    else
+      red "❌ [ERROR] Could not install unzip/curl; try running apt --fix-broken install -y and re-run installer"
+      exit 1
+    fi
   else
     red "⏭️ [SKIP] unzip and curl already present"
   fi
   write_marker unzip_installed
 fi
 
-# Base system packages (this may include kernel or important packages)
+# Base system packages (may require reboot)
 if ! marker_exists system_updated; then
   red "🔧 [STEP] Updating system and installing base packages"
   apt_run "apt-get update -y"
-  apt_run "apt-get upgrade -y"
-  # If upgrade installed packages that may require reboot, detect /var/run/reboot-required
+  apt_run "apt-get upgrade -y" || true
   if [ -f /var/run/reboot-required ]; then
     red "⚠️ [REBOOT] Packages updated require reboot"
     mark_reboot_needed
   fi
-  apt_run "apt-get install -y ca-certificates gnupg lsb-release wget git build-essential jq lsof software-properties-common gpg"
-  red "✅ [OK] Base packages installed"
+  if apt_run "apt-get install -y ca-certificates gnupg lsb-release wget git build-essential jq lsof software-properties-common gpg"; then
+    red "✅ [OK] Base packages installed"
+  else
+    red "⚠️ [WARN] Base package install reported issues; attempt apt --fix-broken install"
+    apt --fix-broken install -y || red "❌ [APT] fix-broken failed; manual intervention required"
+  fi
   write_marker system_updated
 fi
 
-# Install Docker if missing (Docker apt install sometimes triggers service/kmod changes)
+# Install Docker if missing
 if ! marker_exists docker_installed; then
   red "🔧 [STEP] Installing Docker (if missing)"
   if ! command -v docker >/dev/null; then
@@ -123,9 +148,8 @@ if ! marker_exists docker_installed; then
     if apt_run "apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin"; then
       systemctl enable --now docker || true
       red "✅ [OK] Docker installed or enabled"
-      # Installing containerd/docker may require a reboot on some kernels or cgroup changes
       if [ -f /var/run/reboot-required ]; then
-        red "⚠️ [REBOOT] Docker or containerd triggered reboot-required"
+        red "⚠️ [REBOOT] Docker/containerd triggered reboot-required"
         mark_reboot_needed
       fi
     else
@@ -184,7 +208,7 @@ if ! marker_exists deps_installed; then
       if bun install 2>&1 | tee "$TMP_DIR/bun_install.log"; then
         red "✅ [OK] bun install completed"
       else
-        red "⚠️ [WARN] bun install had issues; trying recovery"
+        red "⚠️ [WARN] bun install had issues; attempting recovery"
         bun pm untrusted --yes >/dev/null 2>&1 || bun pm untrusted || true
         bun install 2>&1 | tee -a "$TMP_DIR/bun_install.log" || true
       fi
@@ -267,7 +291,6 @@ if ! marker_exists keys_generated; then
       red "    ▶ Check node logs: journalctl -u demos-node.service -n 200 --no-pager"
       red "    ▶ Run health script: check_demos_node --health --logs=100"
       red "    ▶ Manually inspect: ls -l /root/node"
-      # continue; allow user to debug
     fi
   fi
 fi
@@ -309,7 +332,7 @@ else
   red "    journalctl -u demos-node.service -n 200 --no-pager"
 fi
 
-# Create helper scripts (embedded, idempotent)
+# Create helper scripts and symlinks
 red "🔧 [STEP] Creating embedded helper scripts and symlinks"
 create_helpers(){
   mkdir -p "$HELPER_DIR" "$GLOBAL_BIN" || true
@@ -390,10 +413,8 @@ if [ "$HEALTH_OK" -ge 2 ]; then log "Node appears HEALTHY (score=$HEALTH_OK)"; e
 HC
   chmod 755 "$HELPER_DIR/check_demos_node.sh"
 
-  # Ensure monitor log exists
   touch "$MONITOR_LOG" || true; chown root:root "$MONITOR_LOG" || true; chmod 644 "$MONITOR_LOG" || true
 
-  # Create symlinks (overwrite dangling links)
   ln -sf "$HELPER_DIR/restart_demos_node.sh" "$GLOBAL_BIN/restart_demos_node"
   ln -sf "$HELPER_DIR/backup_demos_keys.sh" "$GLOBAL_BIN/backup_demos_keys"
   ln -sf "$HELPER_DIR/stop_demos_node.sh" "$GLOBAL_BIN/stop_demos_node"
@@ -406,15 +427,13 @@ HC
 create_helpers
 write_marker helpers_created
 
-# Save local copy of the installer robustly (avoid chmod warning)
+# Save local copy of installer robustly
 red "🔧 [STEP] Saving a local copy of the installer (if possible)"
 if [ -f "$0" ]; then
-  # $0 is a file on disk (script executed from file)
   cp -f "$0" "$LOCAL_INSTALLER_PATH" 2>/dev/null || true
   chmod +x "$LOCAL_INSTALLER_PATH" 2>/dev/null || true
   red "✅ [OK] Installer saved locally at $LOCAL_INSTALLER_PATH"
 elif [ -n "$RAW_INSTALLER_URL" ]; then
-  # Attempt to fetch from RAW_INSTALLER_URL if provided (useful when piped)
   if command -v curl >/dev/null 2>&1; then
     if curl -fsSL "$RAW_INSTALLER_URL" -o "$LOCAL_INSTALLER_PATH"; then
       chmod +x "$LOCAL_INSTALLER_PATH" 2>/dev/null || true
@@ -434,10 +453,10 @@ red "🎉 [DONE] Full install complete."
 red "🔗 Global commands: restart_demos_node backup_demos_keys stop_demos_node check_demos_node"
 red "📁 Markers: $MARKER_DIR — remove a marker to re-run a step"
 
-# If a reboot is needed, announce and reboot after short delay
+# If a reboot is needed, announce and reboot after delay
 if [ "$NEED_REBOOT" -eq 1 ]; then
   red "🔁 [REBOOT] A reboot is required to complete installation. Rebooting in 15 seconds."
-  red "    If you want to avoid automatic reboot next time, edit the installer to remove mark_reboot_needed() calls."
+  red "    If you prefer not to auto-reboot, set NEED_REBOOT=0 in the script before running."
   sleep 15
   reboot
 fi
