@@ -8,9 +8,9 @@ IFS=$'\n\t'
 # installs helper scripts and global wrappers, saves a local copy of this installer.
 #
 # Usage:
-# curl -fsSL https://raw.githubusercontent.com/<your-username>/<repo>/main/demos_node_setup.sh -o /root/demos_node_setup.sh && chmod +x /root/demos_node_setup.sh && bash /root/demos_node_setup.sh
-# or:
-# curl -fsSL https://raw.githubusercontent.com/<your-username>/<repo>/main/demos_node_setup.sh | bash
+# curl -fsSL https://raw.githubusercontent.com/weudlll-cyber/demos-installer/main/demos_node_setup.sh -o /root/demos_node_setup.sh && chmod +x /root/demos_node_setup.sh && bash /root/demos_node_setup.sh
+# or (pipe):
+# curl -fsSL https://raw.githubusercontent.com/weudlll-cyber/demos-installer/main/demos_node_setup.sh | bash
 
 MARKER_DIR="/root/.demos_node_setup"
 TMP_DIR="${MARKER_DIR}/tmp"
@@ -389,7 +389,15 @@ if [ "$HEALTH_OK" -ge 2 ]; then log "Node appears HEALTHY (score=$HEALTH_OK)"; e
 EOF2
 chmod +x "$HELPER_DIR/check_demos_node.sh"
 
-# Install global wrappers
+# Close the helpers installer heredoc
+EOF
+
+# Make helpers installer executable (if created)
+if [ -f "$HELPERS_INSTALLER_PATH" ]; then
+  chmod +x "$HELPERS_INSTALLER_PATH" || true
+fi
+
+# Install global wrappers (symlinks)
 ln -sf "$HELPER_DIR/restart_demos_node.sh" /usr/local/bin/restart_demos_node
 ln -sf "$HELPER_DIR/backup_demos_keys.sh" /usr/local/bin/backup_demos_keys
 ln -sf "$HELPER_DIR/stop_demos_node.sh" /usr/local/bin/stop_demos_node
