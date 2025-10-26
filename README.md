@@ -24,6 +24,11 @@ To install a Demos node in one step:
 curl -fsSL https://raw.githubusercontent.com/weudlll-cyber/demos-installer/main/demos_node_setup.sh | bash
 ```
 
+To just install the helper Programs 
+```bash
+curl -fsSL https://raw.githubusercontent.com/weudlll-cyber/demos-installer/main/install_helpers.sh | bash
+```
+
 > 💡 The script will automatically reboot once to finalize system upgrades.  
 > After reboot, re-run the same command or execute the script locally if you saved it.
 
