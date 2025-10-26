@@ -75,6 +75,11 @@ check_demos_node       # Health check with options
   /root/backup_demos_keys.sh
   ```
 
+- To stop your demos node:
+  ```bash
+  /root/stop_demos_node.sh
+  ```
+
 - To check node health:
   ```bash
   /root/check_demos_node.sh --health --logs=100
