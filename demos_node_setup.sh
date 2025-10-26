@@ -4,12 +4,12 @@ IFS=$'\n\t'
 
 # demos_node_setup.sh
 # Single-file installer: DNS wait, dpkg/apt recovery, installs deps, Docker, Bun,
-# clones node, fixes Bun postinstalls, creates systemd unit, starts node,
+# clones node, runs installs, creates systemd unit, starts node,
 # installs helper scripts and global wrappers, saves a local copy of this installer.
 #
 # Usage:
 # curl -fsSL https://raw.githubusercontent.com/<your-username>/<repo>/main/demos_node_setup.sh -o /root/demos_node_setup.sh && chmod +x /root/demos_node_setup.sh && bash /root/demos_node_setup.sh
-# or (pipe):
+# or:
 # curl -fsSL https://raw.githubusercontent.com/<your-username>/<repo>/main/demos_node_setup.sh | bash
 
 MARKER_DIR="/root/.demos_node_setup"
