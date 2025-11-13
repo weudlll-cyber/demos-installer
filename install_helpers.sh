@@ -8,9 +8,10 @@ IFS=$'\n\t'
 
 HELPER_DIR="/root/demos_helpers"
 GLOBAL_BIN="/usr/local/bin"
+MARKER_DIR="/root/.demos_node_setup"
 MONITOR_LOG="/var/log/demos_node_monitor.log"
 
-mkdir -p "$HELPER_DIR" "$GLOBAL_BIN" || true
+mkdir -p "$HELPER_DIR" "$GLOBAL_BIN" "$MARKER_DIR"
 
 # restart_demos_node
 cat > "$HELPER_DIR/restart_demos_node.sh" <<'HR'
@@ -44,7 +45,7 @@ pkill -f "/root/node/run" || true
 lsof -ti :5332 | xargs -r sudo kill -9 || true
 lsof -ti :53550 | xargs -r sudo kill -9 || true
 docker ps -q --filter "name=demos" | xargs -r docker stop || true
-rm -f /run/demos-node.pid /var/run/demos-node.pid /root/.demos_node_setup/installer.lock || true
+rm -f /run/demos-node.pid /var/run/demos-node.pid "$MARKER_DIR/installer.lock" || true
 systemctl status demos-node.service --no-pager -l || true
 echo "Stop sequence complete"
 HS
@@ -158,7 +159,7 @@ touch "$MONITOR_LOG" || true
 chown root:root "$MONITOR_LOG" || true
 chmod 644 "$MONITOR_LOG" || true
 
-# Create symlinks (including .sh suffix for convenience)
+# Create symlinks
 ln -sf "$HELPER_DIR/restart_demos_node.sh" "$GLOBAL_BIN/restart_demos_node"
 ln -sf "$HELPER_DIR/backup_demos_keys.sh" "$GLOBAL_BIN/backup_demos_keys"
 ln -sf "$HELPER_DIR/stop_demos_node.sh" "$GLOBAL_BIN/stop_demos_node"
@@ -166,4 +167,6 @@ ln -sf "$HELPER_DIR/check_demos_node.sh" "$GLOBAL_BIN/check_demos_node"
 ln -sf "$HELPER_DIR/check_demos_node.sh" "$GLOBAL_BIN/check_demos_node.sh"
 chmod 755 "$GLOBAL_BIN"/check_demos_node* "$GLOBAL_BIN"/restart_demos_node "$GLOBAL_BIN"/backup_demos_keys "$GLOBAL_BIN"/stop_demos_node || true
 
-echo "✅ [OK] Helpers installed to $HELPER_DIR and symlinked to $GLOBAL_BIN"
+# Write marker
+touch "$MARKER_DIR/installed_helper"
+echo "✅ [OK] Helpers installed and marker written to $MARKER_DIR/installed_helper"
